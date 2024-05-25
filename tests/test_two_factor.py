@@ -4,13 +4,14 @@
 
     two_factor tests
 
-    :copyright: (c) 2019-2023 by J. Christopher Wagner (jwag).
+    :copyright: (c) 2019-2024 by J. Christopher Wagner (jwag).
     :license: MIT, see LICENSE for more details.
 """
 
 from datetime import timedelta
 import re
 
+import markupsafe
 from passlib.totp import TOTP
 import pytest
 from flask_principal import identity_changed
@@ -26,8 +27,12 @@ from tests.test_utils import (
     authenticate,
     capture_flashes,
     capture_send_code_requests,
+    check_location,
+    check_xlation,
     get_form_action,
+    get_form_input,
     get_session,
+    is_authenticated,
     logout,
 )
 
@@ -59,15 +64,12 @@ def tf_authenticate(app, client, json=False, validate=True, remember=False):
             response = client.post(
                 "/tf-validate",
                 json=dict(code=code),
-                headers={"Content-Type": "application/json"},
             )
-            assert b'"code": 200' in response.data
-            return response.json["response"].get("tf_validity_token", None)
+            assert response.status_code == 200
         else:
             response = client.post(
                 "/tf-validate", data=dict(code=code), follow_redirects=True
             )
-
             assert response.status_code == 200
 
 
@@ -86,12 +88,9 @@ def tf_in_session(session):
 
 
 @pytest.mark.settings(two_factor_always_validate=False)
-def test_always_validate(app, client):
+def test_always_validate(app, client, get_message):
     tf_authenticate(app, client, remember=True)
-    cookie = next(
-        (cookie for cookie in client.cookie_jar if cookie.name == "tf_validity"), None
-    )
-    assert cookie is not None
+    assert client.get_cookie("tf_validity")
 
     logout(client)
 
@@ -106,22 +105,20 @@ def test_always_validate(app, client):
     assert b"Please enter your authentication code" in response.data
 
     # make sure the cookie doesn't affect the JSON request
-    client.cookie_jar.clear("localhost.local", "/", "tf_validity")
-    # Test JSON
-    token = tf_authenticate(app, client, json=True, remember=True)
+    client.delete_cookie("tf_validity")
+    # Test JSON (this authenticates gal@lp.com)
+    tf_authenticate(app, client, json=True, remember=True)
     logout(client)
-    data = dict(email="gal@lp.com", password="password", tf_validity_token=token)
+
+    data = dict(email="gal@lp.com", password="password")
     response = client.post(
         "/login",
         json=data,
         follow_redirects=True,
-        headers={"Content-Type": "application/json"},
     )
     assert response.status_code == 200
     # verify logged in
-    response = client.get("/profile", follow_redirects=False)
-    assert response.status_code == 200
-
+    is_authenticated(client, get_message)
     logout(client)
 
     data["email"] = "gal2@lp.com"
@@ -129,7 +126,6 @@ def test_always_validate(app, client):
         "/login",
         json=data,
         follow_redirects=True,
-        headers={"Content-Type": "application/json"},
     )
     assert response.status_code == 200
     assert response.json["response"]["tf_required"]
@@ -147,11 +143,11 @@ def test_do_not_remember_tf_validity(app, client):
     assert b"Please enter your authentication code" in response.data
 
     # Test JSON
-    token = tf_authenticate(app, client, json=True)
+    tf_authenticate(app, client, json=True)
     logout(client)
-    assert token is None
+    assert not client.get_cookie("tf_validity")
 
-    data = dict(email="gal@lp.com", password="password", tf_validity_token=token)
+    data = dict(email="gal@lp.com", password="password")
     response = client.post(
         "/login",
         json=data,
@@ -178,9 +174,9 @@ def test_tf_expired_cookie(app, client):
     assert b"Please enter your authentication code" in response.data
 
     # Test JSON
-    token = tf_authenticate(app, client, json=True, remember=True)
+    tf_authenticate(app, client, json=True, remember=True)
     logout(client)
-    data = dict(email="gal@lp.com", password="password", tf_validity_token=token)
+    data = dict(email="gal@lp.com", password="password")
     response = client.post(
         "/login",
         json=data,
@@ -207,15 +203,15 @@ def test_change_uniquifier_invalidates_cookie(app, client):
 
     assert b"Please enter your authentication code" in response.data
 
-    client.cookie_jar.clear("localhost.local", "/", "tf_validity")
+    client.delete_cookie("tf_validity")
     # Test JSON
-    token = tf_authenticate(app, client, json=True, remember=True)
+    tf_authenticate(app, client, json=True, remember=True)
     logout(client)
     with app.app_context():
         user = app.security.datastore.find_user(email="gal@lp.com")
         app.security.datastore.set_uniquifier(user)
         app.security.datastore.commit()
-    data = dict(email="gal@lp.com", password="password", tf_validity_token=token)
+    data = dict(email="gal@lp.com", password="password")
     response = client.post(
         "/login",
         json=data,
@@ -242,15 +238,15 @@ def test_tf_reset_invalidates_cookie(app, client):
 
     assert b"Two-factor authentication adds an extra layer of security" in response.data
 
-    client.cookie_jar.clear("localhost.local", "/", "tf_validity")
+    client.delete_cookie("tf_validity")
     # Test JSON
-    token = tf_authenticate(app, client, json=True, remember=True, validate=False)
+    tf_authenticate(app, client, json=True, remember=True, validate=False)
     logout(client)
     with app.app_context():
         user = app.security.datastore.find_user(email="gal@lp.com")
         app.security.datastore.reset_user_access(user)
         app.security.datastore.commit()
-    data = dict(email="gal@lp.com", password="password", tf_validity_token=token)
+    data = dict(email="gal@lp.com", password="password")
     response = client.post(
         "/login",
         json=data,
@@ -404,7 +400,7 @@ def test_two_factor_flag(app, client, get_message):
     # Test change two_factor view from sms to mail
     setup_data = dict(setup="email")
     response = client.post("/tf-setup", data=setup_data, follow_redirects=True)
-    msg = b"To complete logging in, please enter the code sent to your mail"
+    msg = b"Enter code to complete setup"
     assert msg in response.data
 
     # Fetch token validate form
@@ -440,7 +436,7 @@ def test_two_factor_flag(app, client, get_message):
     logout(client)
 
     # Test login with remember_token
-    assert "remember_token" not in [c.name for c in client.cookie_jar]
+    assert not client.get_cookie("remember_token")
     data = dict(email="gal@lp.com", password="password", remember=True)
     response = client.post(
         "/login",
@@ -455,12 +451,7 @@ def test_two_factor_flag(app, client, get_message):
     assert get_message("TWO_FACTOR_LOGIN_SUCCESSFUL") in response.data
 
     # Verify that the remember token is properly set
-    found = False
-    for cookie in client.cookie_jar:
-        if cookie.name == "remember_token":
-            found = True
-            assert cookie.path == "/"
-    assert found
+    assert client.get_cookie("remember_token")
 
     response = logout(client)
     # Verify that logout clears session info
@@ -485,7 +476,7 @@ def test_two_factor_flag(app, client, get_message):
     sms_sender = SmsSenderFactory.createSender("test")
     data = dict(setup="sms", phone="+442083661177")
     response = client.post("/tf-setup", data=data, follow_redirects=True)
-    assert b"To Which Phone Number Should We Send Code To" in response.data
+    assert b"Enter code to complete setup" in response.data
     assert sms_sender.get_count() == 1
     code = sms_sender.messages[0].split()[-1]
 
@@ -514,7 +505,7 @@ def test_two_factor_flag(app, client, get_message):
     assert message in response.data
     rescue_data = dict(help_setup="help")
     response = client.post("/tf-rescue", data=rescue_data, follow_redirects=True)
-    message = b"A mail was sent to us in order to reset your application account"
+    message = b"An email was sent to us in order to reset your application account"
     assert message in response.data
 
 
@@ -550,6 +541,12 @@ def test_setup_bad_phone(app, client, get_message):
 
     sms_sender = SmsSenderFactory.createSender("test")
     data = dict(setup="sms", phone="555-1212")
+    response = client.post("/tf-setup", data=data, follow_redirects=True)
+    assert b"Phone number not valid" in response.data
+    assert sms_sender.get_count() == 0
+
+    # require phone number with SMS
+    data = dict(setup="sms")
     response = client.post("/tf-setup", data=data, follow_redirects=True)
     assert b"Phone number not valid" in response.data
     assert sms_sender.get_count() == 0
@@ -703,6 +700,32 @@ def test_rescue_json(app, client):
 
 
 @pytest.mark.settings(two_factor_required=True)
+def test_json_auth_token(app, client):
+    """
+    Test getting auth_token with two-factor
+    """
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+
+    # Login with someone already setup.
+    sms_sender = SmsSenderFactory.createSender("test")
+    data = dict(email="gal@lp.com", password="password")
+    response = client.post("/login", json=data, headers=headers)
+    assert response.status_code == 200
+    assert response.json["response"]["tf_required"]
+
+    # Verify SMS sent
+    assert sms_sender.get_count() == 1
+    code = sms_sender.messages[0].split()[-1]
+    response = client.post("/tf-validate?include_auth_token", json=dict(code=code))
+    assert response.status_code == 200
+    token = response.json["response"]["user"]["authentication_token"]
+    headers = {"Authentication-Token": token}
+    # make sure can access restricted page
+    response = client.get("/token", headers=headers)
+    assert b"Token Authentication" in response.data
+
+
+@pytest.mark.settings(two_factor_required=True)
 def test_no_opt_out(app, client, get_message):
     # Test if 2FA required, can't opt-out.
     sms_sender = SmsSenderFactory.createSender("test")
@@ -720,7 +743,7 @@ def test_no_opt_out(app, client, get_message):
 
     response = client.get("/tf-setup", follow_redirects=True)
     assert b"Disable two factor" not in response.data
-    assert b"Currently setup two-factor method: sms" in response.data
+    assert b"Currently setup two-factor method: SMS" in response.data
 
     # Try to opt-out
     data = dict(setup="disable")
@@ -791,14 +814,14 @@ def test_opt_in(app, client, get_message):
     sms_sender = SmsSenderFactory.createSender("test")
     data = dict(setup="sms", phone="+442083661177")
     response = client.post("/tf-setup", data=data, follow_redirects=True)
-    assert b"To Which Phone Number Should We Send Code To" in response.data
+    assert b"Enter code to complete setup" in response.data
     assert sms_sender.get_count() == 1
     code = sms_sender.messages[0].split()[-1]
 
     # Validate token - this should complete 2FA setup
     response = client.post("/tf-validate", data=dict(code=code), follow_redirects=True)
     assert b"You successfully changed" in response.data
-    assert response.history[0].location == "/tf-setup"
+    assert check_location(app, response.history[0].location, "/tf-setup")
 
     # Upon completion, session cookie shouldnt have any two factor stuff in it.
     session = get_session(response)
@@ -865,8 +888,9 @@ def test_opt_out_json(app, client):
     assert response.status_code == 200
 
 
+@pytest.mark.filterwarnings("ignore")
 @pytest.mark.recoverable()
-@pytest.mark.settings(two_factor_required=True)
+@pytest.mark.settings(two_factor_required=True, auto_login_after_reset=True)
 def test_recoverable(app, client, get_message):
     # make sure 'forgot password' doesn't bypass 2FA.
     # 'gal@lp.com' already setup for SMS
@@ -917,7 +941,7 @@ def test_admin_setup_reset(app, client, get_message):
     # we shouldn't be logged in
     response = client.get("/profile", follow_redirects=False)
     assert response.status_code == 302
-    assert "/login?next=%2Fprofile" in response.location
+    assert response.location == "/login?next=/profile"
 
     # Use admin to setup gene's SMS/phone.
     with app.app_context():
@@ -1019,29 +1043,20 @@ def test_totp_secret_generation(app, client):
     with app.app_context():
         user = app.security.datastore.find_user(email="jill@lp.com")
         assert signalled_identity[0] == user.fs_uniquifier
+        assert not user.tf_totp_secret
     del signalled_identity[:]
 
     sms_sender = SmsSenderFactory.createSender("test")
-    # Select sms method but do not send a phone number just yet (regenerates secret)
-    data = dict(setup="sms")
+    data = dict(setup="sms", phone="+442083661188")
     response = client.post("/tf-setup", data=data, follow_redirects=True)
-    assert b"To Which Phone Number Should We Send Code To" in response.data
+    assert b"Enter code to complete setup" in response.data
+    assert sms_sender.get_count() == 1
+    code = sms_sender.messages[0].split()[-1]
 
     # Retrieve the currently generated totp secret for later comparison
     session = get_session(response)
-    if "tf_totp_secret" in session:
-        generated_secret = session["tf_totp_secret"]
-    else:
-        with app.app_context():
-            user = app.security.datastore.find_user(email="jill@lp.com")
-            generated_secret = user.tf_totp_secret
+    generated_secret = session["tf_totp_secret"]
     assert "enckey" in generated_secret
-
-    # Send a new phone number in the second step, method remains unchanged
-    data = dict(setup="sms", phone="+442083661188")
-    response = client.post("/tf-setup", data=data, follow_redirects=True)
-    assert sms_sender.get_count() == 1
-    code = sms_sender.messages[0].split()[-1]
 
     # Validate token - this should complete 2FA setup
     response = client.post("/tf-validate", data=dict(code=code), follow_redirects=True)
@@ -1128,7 +1143,7 @@ def test_authr_identity_num(app, client):
 def test_email_salutation(app, client):
     authenticate(client, email="jill@lp.com")
     response = client.post("/tf-setup", data=dict(setup="email"), follow_redirects=True)
-    msg = b"To complete logging in, please enter the code sent to your mail"
+    msg = b"Enter code to complete setup"
     assert msg in response.data
     outbox = app.mail.outbox
 
@@ -1146,7 +1161,7 @@ def test_email_salutation(app, client):
 def test_username_salutation(app, client):
     authenticate(client, email="jill@lp.com")
     response = client.post("/tf-setup", data=dict(setup="email"), follow_redirects=True)
-    msg = b"To complete logging in, please enter the code sent to your mail"
+    msg = b"Enter code to complete setup"
     assert msg in response.data
     outbox = app.mail.outbox
 
@@ -1251,11 +1266,23 @@ def test_propagate_next(app, client):
     with capture_send_code_requests() as codes:
         data = dict(email="gal@lp.com", password="password")
         response = client.post("/login?next=/im-in", data=data, follow_redirects=True)
-        assert "?next=%2Fim-in" in response.request.url
+        assert "?next=/im-in" in response.request.url
         # grab URL from form to show that our template propagates ?next
         verify_url = get_form_action(response)
         response = client.post(
             verify_url, data=dict(code=codes[0]["login_token"]), follow_redirects=False
+        )
+        assert "/im-in" in response.location
+        logout(client)
+
+        # do it with next in the form
+        data = dict(email="gal@lp.com", password="password", next="/im-in")
+        response = client.post("/login", data=data, follow_redirects=True)
+        assert "?next=/im-in" in response.request.url
+        # grab URL from form to show that our template propagates ?next
+        verify_url = get_form_action(response)
+        response = client.post(
+            verify_url, data=dict(code=codes[1]["login_token"]), follow_redirects=False
         )
         assert "/im-in" in response.location
 
@@ -1265,7 +1292,7 @@ def test_verify(app, client, get_message):
     # Test setup when re-authenticate required
     authenticate(client)
     response = client.get("tf-setup", follow_redirects=False)
-    assert "/verify?next=http%3A%2F%2Flocalhost%2Ftf-setup" in response.location
+    assert check_location(app, response.location, "/verify?next=/tf-setup")
     logout(client)
 
     # Now try again - follow redirects to get to verify form
@@ -1292,7 +1319,8 @@ def test_verify(app, client, get_message):
             follow_redirects=False,
         )
         assert response.status_code == 302
-        assert response.location == "http://localhost/tf-setup"
+        assert check_location(app, response.location, "/tf-setup")
+
     assert get_message("REAUTHENTICATION_SUCCESSFUL") == flashes[0]["message"].encode(
         "utf-8"
     )
@@ -1393,7 +1421,7 @@ def test_no_sms(app, get_message):
         response = client.post(
             "/tf-setup", data=dict(setup="email"), follow_redirects=True
         )
-        msg = b"To complete logging in, please enter the code sent to your mail"
+        msg = b"Enter code to complete setup"
         assert msg in response.data
 
         code = app.mail.outbox[0].body.split()[-1]
@@ -1411,10 +1439,158 @@ def test_post_setup_redirect(app, client):
     sms_sender = SmsSenderFactory.createSender("test")
     data = dict(setup="sms", phone="+442083661177")
     response = client.post("/tf-setup", data=data, follow_redirects=True)
-    assert b"To Which Phone Number Should We Send Code To" in response.data
+    assert b"Enter code to complete setup" in response.data
     assert sms_sender.get_count() == 1
     code = sms_sender.messages[0].split()[-1]
 
     # Validate token - this should complete 2FA setup
     response = client.post("/tf-validate", data=dict(code=code), follow_redirects=False)
-    assert response.location == "/post_setup_view"
+    assert check_location(app, response.location, "/post_setup_view")
+
+
+@pytest.mark.app_settings(babel_default_locale="fr_FR")
+@pytest.mark.babel()
+def test_xlation(app, client, get_message_local):
+    # Test method translation
+    assert check_xlation(app, "fr_FR"), "You must run python setup.py compile_catalog"
+
+    # login as gal2 which has 'authenticator' set up
+    response = authenticate(client, email="gal2@lp.com", follow_redirects=True)
+    with app.test_request_context():
+        existing = (
+            "Veuillez saisir votre code d'authentification généré via: authentificateur"
+        )
+        assert markupsafe.escape(existing).encode() in response.data
+    with app.app_context():
+        # generate 'code' as authenticator would and complete authentication
+        user = app.security.datastore.find_user(email="gal2@lp.com")
+        code = app.security._totp_factory.generate_totp_password(user.tf_totp_secret)
+    client.post("/tf-validate", data=dict(code=code), follow_redirects=True)
+    response = client.get("/tf-setup", follow_redirects=True)
+    with app.test_request_context():
+        existing = "Méthode à deux facteurs actuellement configurée : authentificateur"
+        assert markupsafe.escape(existing).encode() in response.data
+
+
+@pytest.mark.csrf(ignore_unauth=True)
+@pytest.mark.settings(two_factor_post_setup_view="/post_setup_view")
+def test_setup_csrf(app, client):
+    # Verify /tf-setup properly handles CSRF and template relays CSRF errors
+    tf_authenticate(app, client)
+    response = client.get("tf-setup")
+    assert b"Disable" in response.data
+    csrf_token = get_form_input(response, "csrf_token")
+
+    response = client.post("tf-setup", data=dict(setup="disable"))
+    assert b"The CSRF token is missing" in response.data
+
+    response = client.post(
+        "tf-setup", data=dict(setup="disable", csrf_token=csrf_token)
+    )
+    assert check_location(app, response.location, "/post_setup_view")
+
+
+@pytest.mark.csrf(ignore_unauth=True, csrfprotect=True)
+def test_setup_csrf_header(app, client):
+    # Test that can setup using csrf token in header
+    tf_authenticate(app, client)
+    response = client.get("tf-setup", json=dict())
+    csrf_token = response.json["response"]["csrf_token"]
+
+    response = client.post("tf-setup", json=dict(setup="disable"))
+    assert response.status_code == 400
+    assert response.json["response"]["errors"][0] == "The CSRF token is missing."
+
+    response = client.post(
+        "tf-setup", json=dict(setup="disable"), headers={"X-CSRF-Token": csrf_token}
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.csrf(csrfprotect=True)
+@pytest.mark.settings(CSRF_COOKIE_NAME="XSRF-Token")
+def test_csrf_2fa_login_cookie(app, client):
+    # Use XSRF-Token cookie for entire login sequence
+    sms_sender = SmsSenderFactory.createSender("test")
+    response = client.get(
+        "/login", data={}, headers={"Content-Type": "application/json"}
+    )
+    assert client.get_cookie("XSRF-Token")
+    csrf_token = response.json["response"]["csrf_token"]
+    assert csrf_token == client.get_cookie("XSRF-Token").value
+
+    response = client.post(
+        "/login",
+        json=dict(email="gal@lp.com", password="password"),
+        headers={
+            "Content-Type": "application/json",
+            "X-CSRF-Token": client.get_cookie("XSRF-Token").value,
+        },
+    )
+    assert b'"code": 200' in response.data
+    session = get_session(response)
+    assert session["tf_state"] == "ready"
+
+    assert sms_sender.get_count() == 1
+    code = sms_sender.messages[0].split()[-1]
+
+    response = client.post(
+        "/tf-validate",
+        json=dict(code=code),
+        headers={
+            "Content-Type": "application/json",
+            "X-CSRF-Token": client.get_cookie("XSRF-Token").value,
+        },
+    )
+    assert response.status_code == 200
+
+    # verify original session csrf_token still works.
+    response = client.post(
+        "/json_auth",
+        json=dict(label="label"),
+        headers={"Content-Type": "application/json", "X-CSRF-Token": csrf_token},
+    )
+    assert response.status_code == 200
+
+    # use XSRF_Cookie to send in csrf_token
+    response = client.post(
+        "/json_auth",
+        json=dict(label="label"),
+        headers={
+            "Content-Type": "application/json",
+            "X-CSRF-Token": client.get_cookie("XSRF-Token").value,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json["label"] == "label"
+
+
+@pytest.mark.csrf(ignore_unauth=True, csrfprotect=True)
+@pytest.mark.settings(CSRF_COOKIE_NAME="XSRF-Token")
+def test_csrf_2fa_nounauth_cookie(app, client):
+    # use CSRF cookie when ignoring unauth endpoints
+    sms_sender = SmsSenderFactory.createSender("test")
+    response = client.post(
+        "/login",
+        json=dict(email="gal@lp.com", password="password"),
+        headers={"Content-Type": "application/json"},
+    )
+
+    code = sms_sender.messages[0].split()[-1]
+    response = client.post(
+        "/tf-validate",
+        json=dict(code=code),
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 200
+
+    response = client.post(
+        "/json_auth",
+        json=dict(label="label"),
+        headers={
+            "Content-Type": "application/json",
+            "X-CSRF-Token": client.get_cookie("XSRF-Token").value,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json["label"] == "label"

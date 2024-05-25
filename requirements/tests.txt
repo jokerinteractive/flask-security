@@ -2,19 +2,18 @@ Flask-Babel
 Babel
 Flask-Login
 Flask-Mailman
-Flask-Mongoengine
 Flask-Principal
-peewee
+peewee; python_version < '3.12'
 Flask-SQLAlchemy
-argon2_cffi
-authlib>=1.1.0
+argon2-cffi
+authlib
 bcrypt
 bleach
 check-manifest
 coverage
 cryptography
 djlint
-python-dateutil
+freezegun
 mongoengine
 mongomock
 msgcheck
@@ -28,8 +27,10 @@ pytest
 qrcode
 # authlib requires requests
 requests
+# passlib requires setuptools which is deprecated
+setuptools
 sqlalchemy
 sqlalchemy-utils
-webauthn>=1.6.0;python_version>='3.8'
+webauthn
 werkzeug
 zxcvbn

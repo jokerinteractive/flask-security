@@ -5,9 +5,11 @@
     Test fixtures and what not
 
     :copyright: (c) 2017 by CERN.
-    :copyright: (c) 2019-2022 by J. Christopher Wagner (jwag).
+    :copyright: (c) 2019-2024 by J. Christopher Wagner (jwag).
     :license: MIT, see LICENSE for more details.
 """
+
+from __future__ import annotations
 
 import os
 import tempfile
@@ -22,6 +24,7 @@ import pytest
 from flask import Flask, Response, jsonify, render_template
 from flask import request as flask_request
 from flask_mailman import Mail
+from flask_wtf import CSRFProtect
 
 from flask_security import (
     MongoEngineUserDatastore,
@@ -37,7 +40,7 @@ from flask_security import (
     auth_token_required,
     http_auth_required,
     get_request_attr,
-    login_required,
+    naive_utcnow,
     roles_accepted,
     roles_required,
     permissions_accepted,
@@ -46,16 +49,13 @@ from flask_security import (
 )
 from flask_security.utils import localize_callback
 
-from tests.test_utils import populate_data
+from tests.test_utils import convert_bool_option, populate_data
 
 NO_BABEL = False
 try:
     from flask_babel import Babel
 except ImportError:
-    try:
-        from flask_babelex import Babel
-    except ImportError:
-        NO_BABEL = True
+    NO_BABEL = True
 
 if t.TYPE_CHECKING:  # pragma: no cover
     from flask.testing import FlaskClient
@@ -95,7 +95,7 @@ class SecurityFixture(Flask):
 
 
 @pytest.fixture()
-def app(request: pytest.FixtureRequest) -> "SecurityFixture":
+def app(request: pytest.FixtureRequest) -> SecurityFixture:
     app = SecurityFixture(__name__)
     app.response_class = Response
     app.debug = True
@@ -123,6 +123,7 @@ def app(request: pytest.FixtureRequest) -> "SecurityFixture":
 
     for opt in [
         "changeable",
+        "change_email",
         "recoverable",
         "registerable",
         "trackable",
@@ -149,6 +150,10 @@ def app(request: pytest.FixtureRequest) -> "SecurityFixture":
     if mfa_test is not None:
         pytest.importorskip("cryptography")
 
+    flask_async_test = marker_getter("flask_async")
+    if flask_async_test is not None:
+        pytest.importorskip("asgiref")  # from flask[async]
+
     # Override config settings as requested for this test
     settings = marker_getter("settings")
     if settings is not None:
@@ -159,6 +164,12 @@ def app(request: pytest.FixtureRequest) -> "SecurityFixture":
         for key, value in settings.kwargs.items():
             app.config[key.upper()] = value
 
+    # allow pytest command line to override everything
+    if request.config.option.setting:
+        for s in request.config.option.setting:
+            key, value = s.split("=")
+            app.config["SECURITY_" + key.upper()] = convert_bool_option(value)
+
     app.mail = Mail(app)  # type: ignore
 
     # use babel marker to signify tests that need babel extension.
@@ -167,6 +178,20 @@ def app(request: pytest.FixtureRequest) -> "SecurityFixture":
         if NO_BABEL:
             raise pytest.skip("Requires Babel")
         Babel(app)
+
+    csrf = marker_getter("csrf")
+    if csrf is not None:
+        # without any keys/arguments - this is the default config
+        # Note that WTF_CSRF_CHECK_DEFAULT = True means Flask_wtf will
+        # run a CSRF check as part of @before_request - before we see it.
+        app.config["WTF_CSRF_ENABLED"] = True
+        if "ignore_unauth" in csrf.kwargs.keys():
+            app.config["WTF_CSRF_CHECK_DEFAULT"] = False
+            app.config["SECURITY_CSRF_IGNORE_UNAUTH_ENDPOINTS"] = True
+        if "csrfprotect" in csrf.kwargs.keys():
+            # This is needed when passing CSRF in header or non-form input
+            app.config["WTF_CSRF_CHECK_DEFAULT"] = False
+            CSRFProtect(app)
 
     @app.route("/")
     def index():
@@ -182,11 +207,11 @@ def app(request: pytest.FixtureRequest) -> "SecurityFixture":
         return render_template("index.html", content="Profile Page")
 
     @app.route("/post_login")
-    @login_required
+    @auth_required()
     def post_login():
         return render_template("index.html", content="Post Login")
 
-    @app.route("/http")
+    @app.route("/http", methods=["GET", "POST"])
     @http_auth_required
     def http():
         return "HTTP Authentication"
@@ -203,6 +228,11 @@ def app(request: pytest.FixtureRequest) -> "SecurityFixture":
     def http_custom_realm():
         assert get_request_attr("fs_authn_via") == "basic"
         return render_template("index.html", content="HTTP Authentication")
+
+    @app.route("/session")
+    @auth_required("session")
+    def session():
+        return "Session Authentication"
 
     @app.route("/token", methods=["GET", "POST"])
     @auth_token_required
@@ -226,6 +256,10 @@ def app(request: pytest.FixtureRequest) -> "SecurityFixture":
     @app.route("/post_confirm")
     def post_confirm():
         return render_template("index.html", content="Post Confirm")
+
+    @app.route("/post_reset")
+    def post_reset():
+        return render_template("index.html", content="Post Reset")
 
     @app.route("/admin")
     @roles_required("admin")
@@ -268,6 +302,11 @@ def app(request: pytest.FixtureRequest) -> "SecurityFixture":
     def echo_json():
         return jsonify(flask_request.get_json())
 
+    @app.route("/json_auth", methods=["POST"])
+    @auth_required()
+    def echo_jsonauth():
+        return jsonify(flask_request.get_json())
+
     @app.route("/unauthz", methods=["GET", "POST"])
     def unauthz():
         return render_template("index.html", content="Unauthorized")
@@ -298,8 +337,9 @@ def mongoengine_datastore(request, app, tmpdir, realmongodburl):
 
 def mongoengine_setup(request, app, tmpdir, realmongodburl):
     # To run against a realdb: mongod --dbpath <somewhere>
-    pytest.importorskip("flask_mongoengine")
-    from flask_mongoengine import MongoEngine
+    import pymongo
+    import mongomock
+    from mongoengine import Document, connect
     from mongoengine.fields import (
         BinaryField,
         BooleanField,
@@ -312,22 +352,23 @@ def mongoengine_setup(request, app, tmpdir, realmongodburl):
     from mongoengine import PULL, CASCADE, disconnect_all
 
     db_name = "flask_security_test"
-    app.config["MONGODB_SETTINGS"] = {
-        "db": db_name,
-        "host": realmongodburl if realmongodburl else "mongomock://localhost",
-        "port": 27017,
-        "alias": db_name,
-    }
+    db_host = realmongodburl if realmongodburl else "mongodb://localhost"
+    db_client_class = pymongo.MongoClient if realmongodburl else mongomock.MongoClient
+    db = connect(
+        alias=db_name,
+        db=db_name,
+        host=db_host,
+        port=27017,
+        mongo_client_class=db_client_class,
+    )
 
-    db = MongoEngine(app)
-
-    class Role(db.Document, RoleMixin):
+    class Role(Document, RoleMixin):
         name = StringField(required=True, unique=True, max_length=80)
         description = StringField(max_length=255)
         permissions = ListField(required=False)
         meta = {"db_alias": db_name}
 
-    class WebAuthn(db.Document, WebAuthnMixin):
+    class WebAuthn(Document, WebAuthnMixin):
         credential_id = BinaryField(primary_key=True, max_bytes=1024, required=True)
         public_key = BinaryField(required=True)
         sign_count = IntField(default=0)
@@ -346,13 +387,13 @@ def mongoengine_setup(request, app, tmpdir, realmongodburl):
         # user_id = ObjectIdField(required=True)
         meta = {"db_alias": db_name}
 
-        def get_user_mapping(self) -> t.Dict[str, str]:
+        def get_user_mapping(self) -> dict[str, str]:
             """
             Return the mapping from webauthn back to User
             """
             return dict(id=self.user.id)
 
-    class User(db.Document, UserMixin):
+    class User(Document, UserMixin):
         email = StringField(unique=True, max_length=255)
         fs_uniquifier = StringField(unique=True, max_length=64, required=True)
         fs_webauthn_user_handle = StringField(unique=True, max_length=64)
@@ -383,14 +424,14 @@ def mongoengine_setup(request, app, tmpdir, realmongodburl):
         def get_security_payload(self):
             return {"email": str(self.email)}
 
-    db.Document.register_delete_rule(WebAuthn, "user", CASCADE)
+    User.register_delete_rule(WebAuthn, "user", CASCADE)
 
     def tear_down():
         with app.app_context():
             User.drop_collection()
             Role.drop_collection()
             WebAuthn.drop_collection()
-            db.connection.drop_database(db_name)
+            db.drop_database(db_name)
             disconnect_all()
 
     request.addfinalizer(tear_down)
@@ -437,6 +478,13 @@ def sqlalchemy_setup(request, app, tmpdir, realdburl):
             # which handles datetime
             return {"email": str(self.email), "last_update": self.update_datetime}
 
+        def augment_auth_token(self, tdata):
+            # for testing - if TESTING_AUGMENT_AUTH_TOKEN is set - call that
+            from flask import current_app
+
+            if cb := current_app.config.get("TESTING_AUGMENT_AUTH_TOKEN"):
+                cb(tdata)
+
     with app.app_context():
         db.create_all()
 
@@ -456,7 +504,7 @@ def sqlalchemy_session_datastore(request, app, tmpdir, realdburl):
     return sqlalchemy_session_setup(request, app, tmpdir, realdburl)
 
 
-def sqlalchemy_session_setup(request, app, tmpdir, realdburl):
+def sqlalchemy_session_setup(request, app, tmpdir, realdburl, **engine_kwargs):
     """
     Note that we test having a different user id column name here.
     """
@@ -490,10 +538,11 @@ def sqlalchemy_session_setup(request, app, tmpdir, realdburl):
 
     app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///" + path
 
-    engine = create_engine(app.config["SQLALCHEMY_DATABASE_URI"])
+    engine = create_engine(app.config["SQLALCHEMY_DATABASE_URI"], **engine_kwargs)
     db_session = scoped_session(
         sessionmaker(autocommit=False, autoflush=False, bind=engine)
     )
+    app.teardown_appcontext(lambda exc: db_session.close())
     Base = declarative_base()
     Base.query = db_session.query_property()
 
@@ -528,7 +577,7 @@ def sqlalchemy_session_setup(request, app, tmpdir, realdburl):
                 nullable=False,
             )
 
-        def get_user_mapping(self) -> t.Dict[str, t.Any]:
+        def get_user_mapping(self) -> dict[str, t.Any]:
             """
             Return the filter needed by find_user() to get the user
             associated with this webauthn credential.
@@ -551,7 +600,7 @@ def sqlalchemy_session_setup(request, app, tmpdir, realdburl):
             DateTime,
             nullable=False,
             server_default=func.now(),
-            onupdate=datetime.utcnow,
+            onupdate=naive_utcnow,
         )
 
     class User(Base, UserMixin):
@@ -585,7 +634,7 @@ def sqlalchemy_session_setup(request, app, tmpdir, realdburl):
             DateTime,
             nullable=False,
             server_default=func.now(),
-            onupdate=datetime.utcnow,
+            onupdate=naive_utcnow,
         )
 
         @declared_attr
@@ -864,7 +913,7 @@ def pony_app(app, pony_datastore):
 
 
 @pytest.fixture()
-def client(request: pytest.FixtureRequest, sqlalchemy_app: t.Callable) -> "FlaskClient":
+def client(request: pytest.FixtureRequest, sqlalchemy_app: t.Callable) -> FlaskClient:
     app = sqlalchemy_app()
     populate_data(app)
     return app.test_client()
@@ -908,7 +957,7 @@ def in_app_context(request, sqlalchemy_app):
 
 
 @pytest.fixture()
-def get_message(app: "Flask") -> t.Callable[..., bytes]:
+def get_message(app: Flask) -> t.Callable[..., bytes]:
     def fn(key, **kwargs):
         rv = app.config["SECURITY_MSG_" + key][0] % kwargs
         return rv.encode("utf-8")
@@ -973,6 +1022,13 @@ def pytest_addoption(parser):
         default=None,
         help="""Set url for using real mongo database for testing.
         e.g. 'localhost'""",
+    )
+    parser.addoption(
+        "--setting",
+        default=None,
+        action="append",
+        help="""Set one or more SECURITY_ settings from command line.
+        e.g. --setting anonymous_user_enable=False""",
     )
 
 

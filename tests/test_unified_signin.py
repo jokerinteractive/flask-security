@@ -4,7 +4,7 @@
 
     Unified signin tests
 
-    :copyright: (c) 2019-2022 by J. Christopher Wagner (jwag).
+    :copyright: (c) 2019-2023 by J. Christopher Wagner (jwag).
     :license: MIT, see LICENSE for more details.
 
 """
@@ -12,6 +12,7 @@
 import base64
 from contextlib import contextmanager
 from datetime import timedelta
+import markupsafe
 from passlib.totp import TOTP
 import re
 from urllib.parse import parse_qsl, urlsplit
@@ -25,7 +26,11 @@ from tests.test_utils import (
     authenticate,
     capture_flashes,
     capture_reset_password_requests,
+    check_location,
+    check_xlation,
     get_form_action,
+    get_session,
+    is_authenticated,
     logout,
     reset_fresh,
     setup_tf_sms,
@@ -116,12 +121,10 @@ def us_tf_authenticate(app, client, json=False, validate=True, remember=False):
                 headers={"Content-Type": "application/json"},
             )
             assert b'"code": 200' in response.data
-            return response.json["response"].get("tf_validity_token", None)
         else:
             response = client.post(
                 "/tf-validate", data=dict(code=code), follow_redirects=True
             )
-
             assert response.status_code == 200
 
 
@@ -193,22 +196,20 @@ def test_simple_signin(app, clients, get_message):
     assert get_message("INVALID_PASSWORD_CODE") in response.data
 
     # Correct code
-    assert "remember_token" not in [c.name for c in clients.cookie_jar]
-    assert "session" not in [c.name for c in clients.cookie_jar]
+    assert not clients.get_cookie("remember_token")
+    assert not clients.get_cookie("session")
     response = clients.post(
         "/us-signin",
         data=dict(identity="matt@lp.com", passcode=requests[0]["token"]),
         follow_redirects=False,
     )
-    assert "remember_token" not in [c.name for c in clients.cookie_jar]
+    assert not clients.get_cookie("remember_token")
     assert "email" in auths[0][1]
 
-    response = clients.get("/profile", follow_redirects=False)
-    assert response.status_code == 200
+    assert is_authenticated(clients, get_message)
 
     logout(clients)
-    response = clients.get("/profile", follow_redirects=False)
-    assert "/login?next=%2Fprofile" in response.location
+    assert not is_authenticated(clients, get_message)
 
     # login via SMS
     sms_sender = SmsSenderFactory.createSender("test")
@@ -228,14 +229,13 @@ def test_simple_signin(app, clients, get_message):
         follow_redirects=True,
     )
     assert response.status_code == 200
-    assert "remember_token" in [c.name for c in clients.cookie_jar]
+    assert clients.get_cookie("remember_token")
     assert "sms" in auths[1][1]
 
-    response = clients.get("/profile", follow_redirects=False)
-    assert response.status_code == 200
+    assert is_authenticated(clients, get_message)
 
     logout(clients)
-    assert "remember_token" not in [c.name for c in clients.cookie_jar]
+    assert not clients.get_cookie("remember_token")
 
 
 def test_simple_signin_json(app, client_nc, get_message):
@@ -294,8 +294,7 @@ def test_simple_signin_json(app, client_nc, get_message):
         assert "email" in auths[0][1]
 
         logout(client_nc)
-        response = client_nc.get("/profile", headers=headers, follow_redirects=False)
-        assert response.status_code == 401
+        assert not is_authenticated(client_nc, get_message)
 
         # login via SMS
         sms_sender = SmsSenderFactory.createSender("test")
@@ -459,9 +458,8 @@ def test_us_passwordless_confirm_json(app, client, get_message):
     outbox = app.mail.outbox
     matcher = re.findall(r"\w+:.*", outbox[0].body, re.IGNORECASE)
     link = matcher[0].split(":", 1)[1]
-    response = client.get(link, headers=headers, follow_redirects=True)
-    assert get_message("EMAIL_CONFIRMED") in response.data
-    logout(client)
+    response = client.get(link, headers=headers, follow_redirects=False)
+    assert check_location(app, response.location, "/login")
 
     # should be able to authenticate now.
     response = client.post(
@@ -585,6 +583,10 @@ def test_post_already_authenticated(client, get_message):
     assert b"Post Login" in response.data
     response = client.post("/us-signin?next=/page1", data=data, follow_redirects=True)
     assert b"Page 1" in response.data
+    # should work in form as well
+    ndata = dict(email="matt@lp.com", password="password", next="/page1")
+    response = client.post("/us-signin", data=ndata, follow_redirects=True)
+    assert b"Page 1" in response.data
 
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
     response = client.post("/us-signin", json=data, headers=headers)
@@ -603,13 +605,14 @@ def test_verify_link(app, client, get_message):
     def authned(myapp, user, **extra_args):
         auths.append((user.email, extra_args["authn_via"]))
 
-    response = client.post(
-        "/us-signin/send-code",
-        data=dict(identity="matt@lp.com", chosen_method="email"),
-        follow_redirects=True,
-    )
-    assert response.status_code == 200
-    assert b"Sign In" in response.data
+    with capture_send_code_requests() as requests:
+        response = client.post(
+            "/us-signin/send-code",
+            data=dict(identity="matt@lp.com", chosen_method="email"),
+            follow_redirects=True,
+        )
+        assert response.status_code == 200
+        assert b"Sign In" in response.data
     outbox = app.mail.outbox
 
     assert outbox[0].to == ["matt@lp.com"]
@@ -620,21 +623,20 @@ def test_verify_link(app, client, get_message):
     )
     magic_link = matcher.group(1)
 
-    # Try with no code
-    response = client.get("us-verify-link?email=matt@lp.com", follow_redirects=False)
+    # Try with missing code
+    response = client.get("us-verify-link?id=matt@lp.com", follow_redirects=False)
     assert "/us-signin" in response.location
-    response = client.get("us-verify-link?email=matt@lp.com", follow_redirects=True)
+    response = client.get("us-verify-link?id=matt@lp.com", follow_redirects=True)
     assert get_message("API_ERROR") in response.data
 
     # Try unknown user
-    response = client.get(
-        "us-verify-link?email=matt42@lp.com&code=12345", follow_redirects=True
-    )
+    response = client.get("us-verify-link?id=123435&code=12345", follow_redirects=True)
     assert get_message("USER_DOES_NOT_EXIST") in response.data
 
     # Try bad code
     response = client.get(
-        "us-verify-link?email=matt@lp.com&code=12345", follow_redirects=True
+        f"us-verify-link?id={requests[0]['user'].fs_uniquifier}&code=12345",
+        follow_redirects=True,
     )
     assert get_message("INVALID_CODE") in response.data
 
@@ -644,8 +646,7 @@ def test_verify_link(app, client, get_message):
     assert "email" in auths[0][1]
 
     # verify logged in
-    response = client.get("/profile", follow_redirects=False)
-    assert response.status_code == 200
+    assert is_authenticated(client, get_message)
 
 
 @pytest.mark.settings(
@@ -659,12 +660,14 @@ def test_verify_link_spa(app, client, get_message):
     # sessions.
     set_email(app)
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
-    response = client.post(
-        "/us-signin/send-code",
-        json=dict(identity="matt@lp.com", chosen_method="email"),
-        headers=headers,
-    )
-    assert response.status_code == 200
+
+    with capture_send_code_requests() as requests:
+        response = client.post(
+            "/us-signin/send-code",
+            json=dict(identity="matt@lp.com", chosen_method="email"),
+            headers=headers,
+        )
+        assert response.status_code == 200
     outbox = app.mail.outbox
 
     matcher = re.match(
@@ -673,7 +676,7 @@ def test_verify_link_spa(app, client, get_message):
     magic_link = matcher.group(1)
 
     # Try with no code
-    response = client.get("us-verify-link?email=matt@lp.com", follow_redirects=False)
+    response = client.get("us-verify-link?id=matt@lp.com", follow_redirects=False)
     assert response.status_code == 302
     split = urlsplit(response.headers["Location"])
     assert "localhost:8081" == split.netloc
@@ -682,9 +685,7 @@ def test_verify_link_spa(app, client, get_message):
     assert get_message("API_ERROR") == qparams["error"].encode("utf-8")
 
     # Try unknown user
-    response = client.get(
-        "us-verify-link?email=matt42@lp.com&code=12345", follow_redirects=False
-    )
+    response = client.get("us-verify-link?id=98765&code=12345", follow_redirects=False)
     assert response.status_code == 302
     split = urlsplit(response.headers["Location"])
     assert "localhost:8081" == split.netloc
@@ -694,7 +695,8 @@ def test_verify_link_spa(app, client, get_message):
 
     # Try bad code
     response = client.get(
-        "us-verify-link?email=matt@lp.com&code=12345", follow_redirects=False
+        f"us-verify-link?id={requests[0]['user'].fs_uniquifier}&code=12345",
+        follow_redirects=False,
     )
     assert response.status_code == 302
     split = urlsplit(response.headers["Location"])
@@ -712,8 +714,7 @@ def test_verify_link_spa(app, client, get_message):
     qparams = dict(parse_qsl(split.query))
     assert qparams["email"] == "matt@lp.com"
 
-    response = client.get("/profile", headers=headers)
-    assert response.status_code == 200
+    assert is_authenticated(client, get_message)
 
 
 def test_setup(app, client, get_message):
@@ -990,7 +991,7 @@ def test_verify(app, client, get_message):
     us_authenticate(client)
     response = client.get("us-setup", follow_redirects=False)
     verify_url = response.location
-    assert "/us-verify?next=http%3A%2F%2Flocalhost%2Fus-setup" in verify_url
+    assert check_location(app, response.location, "/us-verify?next=/us-setup")
     logout(client)
     us_authenticate(client)
 
@@ -1021,7 +1022,7 @@ def test_verify(app, client, get_message):
 
     code = sms_sender.messages[0].split()[-1].strip(".")
     response = client.post(verify_url, data=dict(passcode=code), follow_redirects=False)
-    assert response.location == "http://localhost/us-setup"
+    assert check_location(app, response.location, "/us-setup")
 
 
 def test_verify_json(app, client, get_message):
@@ -1251,6 +1252,7 @@ def test_next(app, client, get_message):
     assert "/post_login" in response.location
 
     logout(client)
+    # Test form.next
     response = client.post(
         "/us-signin",
         data=dict(
@@ -1308,8 +1310,7 @@ def test_confirmable(app, client, get_message):
     assert get_message("CONFIRMATION_REQUIRED") in response.data
 
     # Verify not authenticated
-    response = client.get("/profile", follow_redirects=False)
-    assert "/login?next=%2Fprofile" in response.location
+    assert not is_authenticated(client, get_message)
 
 
 @pytest.mark.registerable()
@@ -1332,7 +1333,7 @@ def test_can_add_password(app, client, get_message):
         follow_redirects=True,
     )
 
-    assert get_message("PASSWORD_RESET") in response.data
+    assert get_message("PASSWORD_RESET_NO_LOGIN") in response.data
 
     # authenticate with new password using standard/old login endpoint.
     response = authenticate(
@@ -1441,11 +1442,9 @@ def test_regular_login(app, client, get_message):
         follow_redirects=True,
     )
     assert response.status_code == 200
-    assert "remember_token" in [c.name for c in client.cookie_jar]
+    assert client.get_cookie("remember_token")
     assert "password" in auths[0][1]
-
-    response = client.get("/profile", follow_redirects=False)
-    assert response.status_code == 200
+    assert is_authenticated(client, get_message)
 
 
 @pytest.mark.settings(
@@ -1478,7 +1477,7 @@ def test_tf(app, client, get_message):
     sms_sender = SmsSenderFactory.createSender("test")
     data = dict(setup="sms", phone="+442083661177")
     response = client.post("/tf-setup", data=data, follow_redirects=True)
-    assert b"To Which Phone Number Should We Send Code To" in response.data
+    assert b"Enter code to complete setup" in response.data
     code = sms_sender.messages[0].split()[-1]
 
     response = client.post("/tf-validate", data=dict(code=code), follow_redirects=True)
@@ -1591,8 +1590,7 @@ def test_tf_not(app, client, get_message):
     # assert "sms" in auths[1][1]
 
     # Verify authenticated
-    response = client.get("/profile", follow_redirects=False)
-    assert response.status_code == 200
+    assert is_authenticated(client, get_message)
 
 
 @pytest.mark.settings(sms_service="bad")
@@ -1813,45 +1811,22 @@ def test_totp_generation(app, client, get_message):
 )
 def test_us_tf_validity(app, client, get_message):
     us_tf_authenticate(app, client, remember=True)
+    assert client.get_cookie("tf_validity")
     logout(client)
-    data = dict(identity="gal@lp.com", passcode="password")
-    response = client.post(
-        "/us-signin", json=data, headers={"Content-Type": "application/json"}
-    )
-    assert b'"code": 200' in response.data
-    cookie = next(
-        (cookie for cookie in client.cookie_jar if cookie.name == "tf_validity"), None
-    )
-    assert cookie is not None
+    # logout does NOT remove this cookie
+    assert client.get_cookie("tf_validity")
 
+    # This time shouldn't require code
+    data = dict(identity="gal@lp.com", passcode="password")
+    response = client.post("/us-signin", json=data)
+    assert response.json["meta"]["code"] == 200
+    assert is_authenticated(client, get_message)
     logout(client)
 
     data = dict(identity="gal2@lp.com", passcode="password")
     response = client.post("/us-signin", data=data, follow_redirects=True)
     assert b"Please enter your authentication code" in response.data
 
-    # clear the cookie to make sure it's not picking it up with json.
-    client.cookie_jar.clear("localhost.local", "/", "tf_validity")
-
-    token = us_tf_authenticate(app, client, remember=True, json=True)
-    logout(client)
-    data = dict(identity="gal@lp.com", passcode="password", tf_validity_token=token)
-    response = client.post(
-        "/us-signin",
-        json=data,
-        follow_redirects=True,
-        headers={"Content-Type": "application/json"},
-    )
-    assert response.status_code == 200
-    # verify logged in
-    response = client.get("/profile", follow_redirects=False)
-
-    assert response.status_code == 200
-    assert b"Welcome gal@lp.com" in response.data
-
-    logout(client)
-
-    data["identity"] = "gal2@lp.com"
     response = client.post(
         "/us-signin",
         json=data,
@@ -2056,9 +2031,9 @@ def test_generic_response(app, client, get_message):
     data = dict(identity="matt@lp.com", code="12345")
     response = client.post("/us-signin", json=data)
     assert response.status_code == 400
-    assert list(response.json["response"]["field_errors"].keys()) == ["null"]
-    assert len(response.json["response"]["field_errors"]["null"]) == 1
-    assert response.json["response"]["field_errors"]["null"][0].encode(
+    assert list(response.json["response"]["field_errors"].keys()) == [""]
+    assert len(response.json["response"]["field_errors"][""]) == 1
+    assert response.json["response"]["field_errors"][""][0].encode(
         "utf-8"
     ) == get_message("GENERIC_AUTHN_FAILED")
     assert response.json["response"]["errors"][0].encode("utf-8") == get_message(
@@ -2073,9 +2048,9 @@ def test_generic_response(app, client, get_message):
     data = dict(identity="matt2@lp.com", code="12345")
     response = client.post("/us-signin", json=data)
     assert response.status_code == 400
-    assert list(response.json["response"]["field_errors"].keys()) == ["null"]
-    assert len(response.json["response"]["field_errors"]["null"]) == 1
-    assert response.json["response"]["field_errors"]["null"][0].encode(
+    assert list(response.json["response"]["field_errors"].keys()) == [""]
+    assert len(response.json["response"]["field_errors"][""]) == 1
+    assert response.json["response"]["field_errors"][""][0].encode(
         "utf-8"
     ) == get_message("GENERIC_AUTHN_FAILED")
     assert response.json["response"]["errors"][0].encode("utf-8") == get_message(
@@ -2085,14 +2060,36 @@ def test_generic_response(app, client, get_message):
     #
     # Test /us-verify-link
     #
-    response = client.get(
-        "us-verify-link?email=matt42@lp.com&code=12345", follow_redirects=True
-    )
+    set_email(app)
+    with capture_send_code_requests() as requests:
+        response = client.post(
+            "/us-signin/send-code",
+            data=dict(identity="matt@lp.com", chosen_method="email"),
+            follow_redirects=True,
+        )
+
+    uid = requests[0]["user"].fs_uniquifier
+    code = requests[0]["login_token"]
+
+    # Try bad/unknown id
+    response = client.get("us-verify-link?id=98765&code=12345", follow_redirects=True)
     assert get_message("GENERIC_AUTHN_FAILED") in response.data
 
     # Try bad code
     response = client.get(
-        "us-verify-link?email=matt@lp.com&code=12345", follow_redirects=True
+        f"us-verify-link?id={uid}&code=12345",
+        follow_redirects=True,
+    )
+    assert get_message("GENERIC_AUTHN_FAILED") in response.data
+
+    # Try deactivated user
+    with app.test_request_context("/"):
+        user = app.security.datastore.find_user(email="matt@lp.com")
+        app.security.datastore.deactivate_user(user)
+        app.security.datastore.commit()
+    response = client.get(
+        f"us-verify-link?id={uid}&code={code}",
+        follow_redirects=True,
     )
     assert get_message("GENERIC_AUTHN_FAILED") in response.data
 
@@ -2104,7 +2101,7 @@ def test_propagate_next(app, client):
     set_phone(app)
     with capture_send_code_requests() as codes:
         response = client.get("profile", follow_redirects=True)
-        assert "?next=%2Fprofile" in response.request.url
+        assert "?next=/profile" in response.request.url
         signin_url = get_form_action(response, 0)
         sendcode_url = get_form_action(response, 1)
         response = client.post(
@@ -2126,7 +2123,7 @@ def test_propagate_next_tf(app, client):
     logout(client, endpoint="/auth/logout")
 
     response = client.get("/profile", follow_redirects=True)
-    assert "?next=%2Fprofile" in response.request.url
+    assert "?next=/profile" in response.request.url
     signin_url = get_form_action(response, 0)
     response = client.post(
         signin_url,
@@ -2140,3 +2137,149 @@ def test_propagate_next_tf(app, client):
         follow_redirects=True,
     )
     assert b"Profile Page" in response.data
+
+    # Try form.next
+    logout(client, endpoint="/auth/logout")
+
+    response = client.post(
+        "/auth/us-signin",
+        data=dict(identity="matt@lp.com", passcode="password", next="/im-in"),
+        follow_redirects=True,
+    )
+    sendcode_url = get_form_action(response, 0)
+    response = client.post(
+        sendcode_url,
+        data=dict(code=sms_sender.messages[0].split()[-1]),
+        follow_redirects=False,
+    )
+    assert "/im-in" in response.location
+
+
+@pytest.mark.app_settings(babel_default_locale="fr_FR")
+@pytest.mark.babel()
+def test_xlation(app, client, get_message_local):
+    # Test method translation
+    assert check_xlation(app, "fr_FR"), "You must run python setup.py compile_catalog"
+
+    set_email(app)
+    us_authenticate(client)
+    response = client.get("us-setup")
+    # note we test against REAL translations - don't use same code as view uses.
+    with app.test_request_context():
+        assert markupsafe.escape("SMS").encode() in response.data
+        p = [
+            "Options de connexion actuellement actives : mot de passe et e-mail.",
+            "Options de connexion actuellement actives : e-mail et mot de passe.",
+        ]
+        assert any(markupsafe.escape(s).encode() in response.data for s in p)
+
+
+@pytest.mark.registerable()
+@pytest.mark.settings(password_required=False)
+@pytest.mark.app_settings(babel_default_locale="fr_FR")
+@pytest.mark.babel()
+def test_empty_password_xlate(app, client, get_message):
+    # test that if no password (and no other setup method) we get correct xlated
+    # template
+    assert check_xlation(app, "fr_FR"), "You must run python setup.py compile_catalog"
+
+    data = dict(email="trp@lp.com", password="")
+    # register w/o password - this will automatically set up 'email'
+    client.post("/register", data=data, follow_redirects=True)
+    # will be auto-logged in since no confirmation
+
+    response = client.get("us-setup")
+    with app.test_request_context():
+        assert (
+            markupsafe.escape(
+                "Options de connexion actuellement actives : e-mail."
+            ).encode()
+            in response.data
+        )
+
+    # white-box testing - there are 2 places in us-setup code that set active methods
+    response = client.post("us-setup", data=dict(delete_method="email"))
+    with app.test_request_context():
+        assert (
+            markupsafe.escape(
+                "Options de connexion actuellement actives : aucune."
+            ).encode()
+            in response.data
+        )
+
+    response = client.get("us-setup")
+    with app.test_request_context():
+        assert (
+            markupsafe.escape(
+                "Options de connexion actuellement actives : aucune."
+            ).encode()
+            in response.data
+        )
+
+
+@pytest.mark.two_factor()
+@pytest.mark.csrf(csrfprotect=True)
+@pytest.mark.settings(CSRF_COOKIE_NAME="XSRF-Token")
+def test_csrf_2fa_us_cookie(app, client):
+    # Use XSRF-Token cookie for entire login sequence
+    sms_sender = SmsSenderFactory.createSender("test")
+    response = client.get(
+        "/us-signin", data={}, headers={"Content-Type": "application/json"}
+    )
+    assert client.get_cookie("XSRF-Token")
+    csrf_token = response.json["response"]["csrf_token"]
+    assert csrf_token == client.get_cookie("XSRF-Token").value
+
+    # verify requires CSRF
+    response = client.post(
+        "/us-signin",
+        json=dict(identity="gal@lp.com", passcode="password"),
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 400
+    assert response.json["response"]["errors"][0] == "The CSRF token is missing."
+
+    response = client.post(
+        "/us-signin",
+        json=dict(identity="gal@lp.com", passcode="password"),
+        headers={
+            "Content-Type": "application/json",
+            "X-CSRF-Token": client.get_cookie("XSRF-Token").value,
+        },
+    )
+    assert b'"code": 200' in response.data
+    session = get_session(response)
+    assert session["tf_state"] == "ready"
+
+    assert sms_sender.get_count() == 1
+    code = sms_sender.messages[0].split()[-1]
+
+    response = client.post(
+        "/tf-validate",
+        json=dict(code=code),
+        headers={
+            "Content-Type": "application/json",
+            "X-CSRF-Token": client.get_cookie("XSRF-Token").value,
+        },
+    )
+    assert response.status_code == 200
+
+    # verify original session csrf_token still works.
+    response = client.post(
+        "/json_auth",
+        json=dict(label="label"),
+        headers={"Content-Type": "application/json", "X-CSRF-Token": csrf_token},
+    )
+    assert response.status_code == 200
+
+    # use XSRF_Cookie to send in csrf_token
+    response = client.post(
+        "/json_auth",
+        json=dict(label="label"),
+        headers={
+            "Content-Type": "application/json",
+            "X-CSRF-Token": client.get_cookie("XSRF-Token").value,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json["label"] == "label"

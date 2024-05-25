@@ -3,10 +3,332 @@ Flask-Security Changelog
 
 Here you can see the full list of changes between each Flask-Security release.
 
-Version 5.1.1
+Version 5.5.0
 -------------
 
 Released TBD
+
+Features
+++++++++
+- (:issue:`956`) Add support for changing registered user's email (:py:data:`SECURITY_CHANGE_EMAIL`).
+
+Fixes
++++++
+- (:pr:`972`) Set :py:data:`SECURITY_CSRF_COOKIE` at beginning (GET /login) of authentication
+  ritual - just as we return the CSRF token. (thanks @e-goto)
+
+Version 5.4.3
+-------------
+
+Released March 23, 2024
+
+Fixes
++++++
+- (:issue:`950`) Regression - some templates no longer getting correct config (thanks pete7863).
+- (:issue:`954`) CSRF not properly ignored for application forms using :py:data:`SECURITY_CSRF_PROTECT_MECHANISMS`.
+- (:pr:`957`) Improve jp translations (e-goto)
+- (:issue:`959`) Regression - datetime_factory should still be an attribute (thanks TimotheeJeannin)
+- (:issue:`942`) :py:data:`SECURITY_RETURN_GENERIC_RESPONSES` hide email validation/syntax errors.
+
+Version 5.4.2
+-------------
+
+Released March 8, 2024
+
+Fixes
++++++
+- (:issue:`946`) OpenAPI spec missing.
+- (:pr:`945`) Doc fixes (e-goto)
+- (:pr:`941`) Update ES/IT translations (gissimo)
+
+Version 5.4.0 & 5.4.1
+----------------------
+
+Released February 26, 2024
+
+Among other changes, this continues the process of dis-entangling Flask-Security
+from Flask-Login and may require some application changes due to backwards incompatible changes.
+
+Features & Improvements
++++++++++++++++++++++++
+- (:issue:`879`) Work with Flask[async]. view decorators and signals support async handlers.
+- (:pr:`900`) CI support for python 3.12
+- (:pr:`901`) Work with py_webauthn 2.0 (and only 2.0+)
+- (:pr:`899`) Improve (and simplify) Two-Factor setup. See below for backwards compatability issues and new functionality.
+- (:issue:`912`) Improve oauth debugging support. Handle next propagation in a more general way.
+- (:pr:`877`) Make AnonymousUser (Flask-Login) optional and deprecated.
+- (:pr:`906`) Remove undocumented and untested looking in session for possible 'next'
+  redirect location.
+- (:pr:`881`) No longer rely on Flask-Login.unauthorized callback. See below for implications.
+- (:issue:`904`) Changes to default unauthorized handler - remove use of referrer header (see below) and document precise behavior.
+- (:pr:`927`) The authentication_token format has changed - adding per-token expiry time and future session ID.
+  Old tokens are still accepted.
+
+
+Docs and Chores
++++++++++++++++
+- (:pr:`889`) Improve method translations for unified signin and two factor. Remove support for Flask-Babelex.
+- (:pr:`911`) Chore - stop setting all config as attributes. init_app(\*\*kwargs) can only
+  set forms, flags, and utility classes (see below for compatibility concerns).
+- (:pr:`873`) Update Spanish and Italian translations. (gissimo)
+- (:pr:`855`) Improve translations for two-factor method selection. (gissimo)
+- (:pr:`866`) Improve German translations. (sr-verde)
+- (:pr:`911`) Remove deprecation of AUTO_LOGIN_AFTER_CONFIRM - it has a reasonable use case.
+- (:pr:`931`) Update message extraction - note that the CONFIRM_REGISTRATION message was changed to improve
+  readability.
+
+Fixes
++++++
+
+- (:issue:`845`) us-signin magic link should use fs_uniquifier (not email).
+- (:issue:`893`) Improve open-redirect vulnerability mitigation. (see below)
+- (:issue:`875`) user_datastore.create_user has side effects on mutable inputs. (NoRePercussions)
+- (:pr:`878`) The long deprecated _unauthorized_callback/handler has been removed.
+- (:issue:`884`) Oauth re-used POST_LOGIN_VIEW which caused confusion. See below for the new configuration and implications.
+- (:pr:`908`) Improve CSRF documentation and testing. Fix bug where a CSRF failure could
+  return an HTML page even if the request was JSON.
+- (:issue:`925`) Register with JSON and authentication token failed CSRF. (lilz-egoto)
+- (:issue:`870`) Fix 2 issues with CSRF configuration.
+- (:pr:`914`) It was possible that if :data:`SECURITY_EMAIL_VALIDATOR_ARGS` were set that
+  deliverability would be checked even for login.
+
+Backwards Compatibility Concerns
++++++++++++++++++++++++++++++++++
+
+- Passing in an AnonymousUser class as part of Security initialization has been removed.
+- The never-public method _get_unauthorized_response has been removed.
+- Social-Oauth - a new configuration variable :py:data:`SECURITY_POST_OAUTH_LOGIN_VIEW` was introduced
+  and it replaces :py:data:`SECURITY_POST_LOGIN_VIEW` in the oauthresponse logic when
+  :py:data:`SECURITY_REDIRECT_BEHAVIOR` == `"spa"`.
+- Two-Factor setup. Prior to this release when setting up "SMS" the `/tf-setup` endpoint could
+  be POSTed to w/o a phone number, and then another POST could be made to set the phone number.
+  This has always been confusing and added complexity to the code. Now, if "SMS" is selected, the phone number
+  must be supplied (which has always been supported).
+  Other changes:
+
+    - The default two-factor-setup.html template now has a more generic `"Enter code to complete setup"` message.
+    - Make sure the `"disable"` option first.
+    - Adding any currently configured two-factor method on setup failure.
+    - The two_factor_verify template won't show the rescue form if it isn't set.
+    - A GET on /tf-validate now returns the two-factor-validate-form always - before
+      if the client was validating a new method, it would return the two-factor-setup-form
+    - After successfully disabling two-factor the client is redirected to :py:data:`SECURITY_TWO_FACTOR_POST_SETUP_VIEW`
+      rather than :py:data:`SECURITY_POST_LOGIN_VIEW`.
+
+- Bring unauthenticated handling completely into Flask-Security:
+    Prior to this release, Flask-Security's :meth:`.Security.unauthn_handler` - called when
+    a request wasn't properly authenticated - handled JSON requests then delegated
+    form responses to Flask-Login's unauthenticated_callback. That logic has been moved
+    into Flask-Security and Flask-Login is configured to call back into Flask-Security's
+    handler. While the logic is very similar the following differences might be observed:
+
+    - Flask-Login's FORCE_HOST_FOR_REDIRECTS configuration isn't honored
+    - Flask-Login's USE_SESSION_FOR_NEXT configuration isn't honored
+    - The flashed message is SECURITY_MSG_UNAUTHENTICATED rather than SECURITY_MSG_LOGIN.
+      Furthermore SECURITY_MSG_UNAUTHENTICATED was reworded to read better.
+    - Flask-Login uses `urlencode` to encode the `next` query param - which quotes the '/' character.
+      Werkzeug (which Flask-Security uses to build the URL) uses `quote`
+      which considers '/' a safe character and isn't encoded.
+    - The signal sent on an unauthenticated request has changed to :data:`user_unauthenticated`.
+      Flask-Login used to send a `user_unauthorized` signal.
+
+- Flask-Security no longer configures anything related to Flask-Login's `fresh_login` logic.
+  This shouldn't be used - instead use Flask-Security's :meth:`flask_security.auth_required` decorator.
+- Support for Flask-Babelex has been removed. Please convert to Flask-Babel.
+- JSON error response has changed due to issue with WTForms form-level errors. When WTForms
+  introduced form-level errors they added it to the form.errors response using `None` as a key.
+  When serializing it, it would turn into "null". However, if there is more than one error
+  the default settings for JSON serialization in Flask attempt to sort the keys - which fails
+  with the `None` key. An issue has been filed with WTForms - and maybe it will be changed.
+  Flask-Security now changes any `None` key to `""`.
+- The default unauthorized handler behavior has changed slightly and is now documented. The default
+  (:data:`SECURITY_UNAUTHORIZED_VIEW` == ``None``) has not changed (a default HTTP 403 response).
+  The precise behavior when :data:`SECURITY_UNAUTHORIZED_VIEW` was set was never documented.
+  The important change is that Flask-Security no longer ever looks at the request.referrer header and
+  will never redirect to it. If an application needs that, it can provide a callable that can return
+  that or any other header.
+- Configuration variables (and other things) are no longer added as attributes on the Security instance.
+  For example `security.username_enable` no longer exists - this could be an issue in code or templates.
+  For templates, Flask places `config` in the Jinja context - so rather than using an attribute, use
+  `config["SECURITY_USERNAME_ENABLE"]` for the example above.
+- Open Redirect mitigation. Release 4.1.0 had a fix for :issue:`486` involving a potential
+  open redirect. This was very low priority since the default configuration of Werkzeug (always
+  convert the Location header to absolute URL) rendered the vulnerability un-exploitable. The solution at that
+  time was to add an optional regex looking for these bizarre URLs that from a HTTP spec perspective
+  are relative, but various browsers would interpret as absolute. In Werkzeug release 2.1 the
+  default was changed so that the Location header was allowed to be a relative URL. This made the
+  open redirect vulnerability much more likely to be exploitable. More recently, additional bizarre
+  URLs were found, as documented in :issue:`893`. More work was done and a patch release 5.3.3
+  was published.  This fix utilized changing the Werkzeug default back to absolute and an updated
+  regex. Comments and thoughts by @gmanfuncky proposed a much better solution and that is in 5.4.
+  This implementation is independent of Werkzeug (and relative Location headers are again the default).
+  The entire regex option has been removed.
+  Instead, any user-supplied path used as a redirect is parsed and quoted.
+
+Notes
+++++++
+- Historically, the **current_user** proxy (managed by Flask-Login) always pointed to a user object.
+  If the user wasn't authenticated, it pointed to an AnonymousUser object. With this release,
+  setting :py:data:`SECURITY_ANONYMOUS_USER_DISABLED` to `True` will force **current_user** to be set
+  to `None` if the requesting user isn't authenticated. It should be noted that this is in support
+  of a proposal by the Pallets team to remove AnonymousUser from Flask-Login - as well as deprecating
+  the `is_authenticated` property. The default behavior (`False`) should be the same as prior releases.
+  A new function `_fs_is_user_authenticated` is now part of the render_template context that
+  templates can use instead of `current_user.is_authenticated`.
+
+Version 5.3.3
+-------------
+
+Released December 29, 2023
+
+Fixes
++++++
+- (:issue:`893`) Once again work on open-redirect vulnerability - this time due to newer Werkzeug.
+  Addresses: CVE-2023-49438
+
+Version 5.3.2
+-------------
+
+Released October 23, 2023
+
+Fixes
+++++++
+
+- (:issue:`859`) Update Quickstart to show how to properly handle SQLAlchemy connections.
+- (:issue:`861`) Auth Token not returned from /tf-validate. (thanks lilz-egoto)
+- (:pr:`864`) Fix for latest email_validator deprecation - bump minimum to 2.0.0
+- (:pr:`865`) Deprecate passing in the anonymous_user class (sent to Flask-Login).
+
+Version 5.3.1
+-------------
+
+Released October 14, 2023
+
+**Please Note:**
+
+- If your application uses webauthn you must use pydantic < 2.0
+  until the issue with user_handle is resolved.
+
+Fixes
+++++++
+
+- (:issue:`847`) Compatability with Flask 3.0 (wangsha)
+- (:issue:`829`) Revert change in 5.3.0 that added a Referrer-Policy header.
+- (:issue:`826`) Fix error in quickstart (codycollier)
+- (:pr:`835`) Update Armenian translations (amkrtchyan-tmp)
+- (:pr:`831`) Update German translations. (sr-verde)
+- (:issue:`853`) Fix 'next' propagation when passed as form.next (thanks cariaso)
+
+Version 5.3.0
+-------------
+
+Released July 27, 2023
+
+This is a minor version bump due to some small backwards incompatible changes to
+WebAuthn, recoverability (/reset), confirmation (/confirm) and the two factor validity feature.
+
+Fixes
+++++++
+
+- (:pr:`807`) Webauthn Updates to handling of transport.
+- (:pr:`809`) Fix MongoDB support by eliminating dependency on flask-mongoengine.
+  Improve MongoDB quickstart.
+- (:issue:`801`) Fix Quickstart for SQLAlchemy with scoped session.
+- (:issue:`806`) Login no longer, by default, checks for email deliverability.
+- (:issue:`791`) Token authentication is no longer accepted on endpoints which only allow
+  'session' as authentication-method. (N247S)
+- (:issue:`814`) /reset and /confirm and GENERIC_RESPONSES and additional form args don't mix.
+- (:issue:`281`) Reset password can be exploited and other OWASP improvements.
+- (:pr:`817`) Confirmation can be exploited and other OWASP improvements.
+- (:pr:`819`) Convert to pyproject.toml, build, remove setup.py/.cfg.
+- (:pr:`823`) the tf_validity feature now ONLY sets a cookie - and the token is no longer
+  returned as part of a JSON response.
+- (:pr:`825`) Fix login/unified signin templates to properly send CSRF token. Add more tests.
+- (:pr:`826`) Improve Social Oauth example code.
+
+Backwards Compatibility Concerns
++++++++++++++++++++++++++++++++++
+
+- To align with the W3C WebAuthn Level2 and 3 spec - transports are now part of the registration response.
+  This has been changed BOTH in the server code (using webauthn data structures) as well as the sample
+  javascript code. If an application has their own javascript front end code - it might need to be changed.
+- The tf_validity feature :py:data:`SECURITY_TWO_FACTOR_ALWAYS_VALIDATE` used to set a cookie if the request was
+  form based, and return the token as part of a JSON response. Now, this feature is ONLY cookie based and the token
+  is no longer returned as part of any response.
+- Reset password was changed to adhere to OWASP recommendations and reduce possible exploitation:
+
+    - A new email (with new token) is no longer sent upon expired token. Users must restart
+      the reset password process.
+    - The user is no longer automatically logged in upon successful password reset. For
+      backwards compatibility :py:data:`SECURITY_AUTO_LOGIN_AFTER_RESET` can be set to ``True``.
+      Note that this compatibility feature is deprecated and will be removed in a future release.
+    - Identity information (identity, email) is no longer sent as part of the URL redirect
+      query params.
+    - The SECURITY_MSG_PASSWORD_RESET_EXPIRED message no longer contains the user's identity/email.
+    - The default for :py:data:`SECURITY_RESET_PASSWORD_WITHIN` has been changed from `5 days` to `1 days`.
+    - The response to GET /reset/<token> sets the HTTP header `Referrer-Policy` to `no-referrer` as suggested
+      by OWASP. *PLEASE NOTE: this was backed out in 5.3.1*
+- Confirm email was changed to adhere to OWASP recommendations and reduce possible exploitation:
+
+    - A new email (with new token) is no longer sent upon expired token. Users must restart
+      the confirmation process.
+    - Identity information (identity, email) is no longer sent as part of the URL redirect
+      query params.
+    - The :py:data:`SECURITY_AUTO_LOGIN_AFTER_CONFIRM` configuration variable now defaults to ``False`` - meaning
+      after a successful email confirmation, the user must still sign in using the usual mechanisms. This is to
+      align better with OWASP best practices. Setting it to ``True`` will restore prior behavior.
+    - The SECURITY_MSG_CONFIRMATION_EXPIRED message no longer contains the user's identity/email.
+    - The response to GET /reset/<token> sets the HTTP header `Referrer-Policy` to `no-referrer` as suggested
+      by OWASP. *PLEASE NOTE: this was backed out in 5.3.1*
+
+Version 5.2.0
+-------------
+
+Released May 6, 2023
+
+Note: Due to rapid deprecation and removal of APIs from the Pallets team,
+maintaining the testing of back versions of various packages is taking too
+much time and effort. In this release only current versions of the various
+dependent packages are being tested.
+
+Fixes
++++++
+
+- (:issue:`764`) Remove old Werkzeug compatibility check.
+- (:issue:`777`) Compatibility with Quart.
+- (:pr:`780`) Remove dependence on pkg_resources / setuptools (use importlib_resources package)
+- (:pr:`792`) Fix tests to work with latest Werkzeug/Flask. Update requirements_low to match current releases.
+- (:pr:`792`) Drop support for Python 3.7
+
+Known Issues
+++++++++++++
+
+- Flask-mongoengine hasn't released in a while and currently will not work with latest Flask and Flask-Security-Too
+  (this is due to the JSONEncoder being deprecated and removed).
+
+Backwards Compatibility Concerns
++++++++++++++++++++++++++++++++++
+- The removal of pkg_resources required changing the config variable :py:data:`SECURITY_I18N_DIRNAME`.
+  If your application modified or extended this configuration variable, a small change will be required.
+
+Version 5.1.2
+-------------
+
+Released March 12, 2023
+
+Fixes
++++++
+
+- (:issue:`771`) Hungarian translations not working.
+- (:pr:`769`) Fix documentation for send_mail. (gg)
+- (:pr:`768`) Fix for latest mongoengine and mongomock.
+- (:pr:`766`) Fix inappropriate use of &thinsp& in French translations. (maxdup)
+- (:pr:`773`) Improve documentation around subclassing forms.
+
+Version 5.1.1
+-------------
+
+Released March 1, 2023
 
 Fixes
 +++++
@@ -15,7 +337,10 @@ Fixes
   There was a too aggressive config check.
 - (:pr:`739`) Update Russian translations. (ademaro)
 - (:pr:`743`) Run all templates through a linter. (ademaro)
-- (:pr:`744`) Errors with SQLAlchemy 2.0 (sqlalchemy-utils isn't ready).
+- (:pr:`757`) Fix json/flask backwards compatibility hack.
+- (:issue:`759`) Fix quickstarts - make sure they run using `flask run`
+- (:pr:`755`) Fix unified signup when two-factor not enabled. (sebdroid)
+- (:pr:`763`) Add dependency on setuptools (pkg_resources). (hroncok)
 
 Version 5.1.0
 -------------
@@ -91,7 +416,7 @@ Fixes
 Version 5.0.0
 -------------
 
-Released August 27. 2022
+Released August 27, 2022
 
 **PLEASE READ CHANGE NOTES CAREFULLY - THERE ARE LIKELY REQUIRED CHANGES YOU WILL HAVE TO MAKE.**
 
@@ -643,7 +968,7 @@ Released March 31, 2020
 
 Features
 ++++++++
-- (:pr:`257`) Support a unified sign in feature. Please see :ref:`unified-sign-in`.
+- (:pr:`257`) Support a unified sign in feature. Please see :ref:`configuration:unified signin`.
 - (:pr:`265`) Add phone number validation class. This is used in both unified sign in
   as well as two-factor when using ``sms``.
 - (:pr:`274`) Add support for 'freshness' of caller's authentication. This permits endpoints

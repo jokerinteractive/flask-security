@@ -1,4 +1,4 @@
-# :copyright: (c) 2019-2022 by J. Christopher Wagner (jwag).
+# :copyright: (c) 2019-2024 by J. Christopher Wagner (jwag).
 # :license: MIT, see LICENSE for more details.
 
 """
@@ -20,13 +20,15 @@ Since we don't actually send email - we have signal handlers flash the required
 data and a mail sender that flashes what mail would be sent!
 
 """
+from __future__ import annotations
 
-import datetime
+from datetime import timedelta
 import os
 import typing as t
 
 from flask import Flask, flash, render_template_string, request, session
 from flask_sqlalchemy import SQLAlchemy
+from flask_wtf import CSRFProtect
 
 from flask_security import (
     MailUtil,
@@ -34,7 +36,6 @@ from flask_security import (
     WebauthnUtil,
     auth_required,
     current_user,
-    login_required,
     SQLAlchemyUserDatastore,
 )
 from flask_security.models import fsqla_v3 as fsqla
@@ -45,7 +46,12 @@ from flask_security.signals import (
     user_not_registered,
     user_registered,
 )
-from flask_security.utils import hash_password, uia_email_mapper, uia_phone_mapper
+from flask_security.utils import (
+    hash_password,
+    naive_utcnow,
+    uia_email_mapper,
+    uia_phone_mapper,
+)
 
 
 def _find_bool(v):
@@ -62,9 +68,9 @@ class FlashMailUtil(MailUtil):
         template: str,
         subject: str,
         recipient: str,
-        sender: t.Union[str, tuple],
+        sender: str | tuple,
         body: str,
-        html: t.Optional[str],
+        html: str | None,
         **kwargs: t.Any,
     ) -> None:
         flash(f"Email body: {body}")
@@ -100,11 +106,11 @@ def create_app():
     app.config["SECURITY_TOTP_SECRETS"] = {
         "1": "TjQ9Qa31VOrfEzuPy4VHQWPCTmRzCnFzMKLxXYiZu9B"
     }
-    app.config["SECURITY_FRESHNESS"] = datetime.timedelta(minutes=1)
-    app.config["SECURITY_FRESHNESS_GRACE_PERIOD"] = datetime.timedelta(minutes=2)
+    app.config["SECURITY_FRESHNESS"] = timedelta(minutes=10)
+    app.config["SECURITY_FRESHNESS_GRACE_PERIOD"] = timedelta(minutes=20)
     app.config["SECURITY_USERNAME_ENABLE"] = True
     app.config["SECURITY_USERNAME_REQUIRED"] = True
-    app.config["SECURITY_PASSWORD_REQUIRED"] = True
+    app.config["SECURITY_PASSWORD_REQUIRED"] = False  # allow registration w/o password
     app.config["SECURITY_RETURN_GENERIC_RESPONSES"] = False
     # enable oauth - note that this assumes that app is passes XXX_CLIENT_ID and
     # XXX_CLIENT_SECRET as environment variables.
@@ -112,7 +118,7 @@ def create_app():
     # app.config["SECURITY_URL_PREFIX"] = "/fs"
 
     class TestWebauthnUtil(WebauthnUtil):
-        def generate_challenge(self, nbytes: t.Optional[int] = None) -> str:
+        def generate_challenge(self, nbytes: int | None = None) -> str:
             # Use a constant Challenge so we can use this app to generate gold
             # responses for use in unit testing. See test_webauthn.
             # NEVER NEVER NEVER do this in production
@@ -128,6 +134,7 @@ def create_app():
     # Turn on all features (except passwordless since that removes normal login)
     for opt in [
         "changeable",
+        "change_email",
         "recoverable",
         "registerable",
         "trackable",
@@ -152,8 +159,10 @@ def create_app():
         ):
             app.config[ev] = _find_bool(os.environ.get(ev))
 
+    CSRFProtect(app)
     # Create database models and hook up.
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+    app.config.setdefault("SQLALCHEMY_DATABASE_URI", "sqlite:///:memory:")
     db = SQLAlchemy(app)
     fsqla.FsModels.set_db_info(db)
 
@@ -175,46 +184,30 @@ def create_app():
         mail_util_cls=FlashMailUtil,
     )
 
+    # Setup Babel
+    def get_locale():
+        # For a given session - set lang based on first request.
+        # Honor explicit url request first
+        global SET_LANG
+        if not SET_LANG:
+            session.pop("lang", None)
+            SET_LANG = True
+        if "lang" not in session:
+            locale = request.args.get("lang", None)
+            if not locale:
+                locale = request.accept_languages.best
+            if not locale:
+                locale = "en"
+            if locale:
+                session["lang"] = locale
+        return session.get("lang", None).replace("-", "_")
+
     try:
         import flask_babel
 
-        babel = flask_babel.Babel(app)
+        flask_babel.Babel(app, locale_selector=get_locale)
     except ImportError:
-        try:
-            import flask_babelex
-
-            babel = flask_babelex.Babel(app)
-        except ImportError:
-            babel = None
-
-    if babel:
-
-        def get_locale():
-            # For a given session - set lang based on first request.
-            # Honor explicit url request first
-            global SET_LANG
-            if not SET_LANG:
-                session.pop("lang", None)
-                SET_LANG = True
-            if "lang" not in session:
-                locale = request.args.get("lang", None)
-                if not locale:
-                    locale = request.accept_languages.best
-                if not locale:
-                    locale = "en"
-                if locale:
-                    session["lang"] = locale
-            return session.get("lang", None).replace("-", "_")
-
-        babel.locale_selector = get_locale
-
-    @app.after_request
-    def allow_absolute_redirect(r):
-        # This is JUST to test odd possible redirects that look relative but are
-        # interpreted by browsers as absolute.
-        # DON'T SET THIS IN YOUR APPLICATION!
-        r.autocorrect_location_header = False
-        return r
+        pass
 
     @user_registered.connect_via(app)
     def on_user_registered(myapp, user, confirm_token, **extra):
@@ -254,7 +247,7 @@ def create_app():
 
     # Views
     @app.route("/")
-    @login_required
+    @auth_required()
     def home():
         return render_template_string(
             """
@@ -284,7 +277,7 @@ def add_user(ds, email, password, roles):
     roles = [ds.find_or_create_role(rn) for rn in roles]
     ds.commit()
     user = ds.create_user(
-        email=email, password=pw, active=True, confirmed_at=datetime.datetime.utcnow()
+        email=email, password=pw, active=True, confirmed_at=naive_utcnow()
     )
     ds.commit()
     for role in roles:

@@ -43,12 +43,14 @@ An example configuration::
     SECURITY_REGISTERABLE = True
     SECURITY_UNIFIED_SIGNIN = True
 
-    # These need to be defined to handle redirects
+    # These need to be defined to handle redirects - these are part of the apps UI
     # As defined in the API documentation - they will receive the relevant context
     SECURITY_POST_CONFIRM_VIEW = "/confirmed"
     SECURITY_CONFIRM_ERROR_VIEW = "/confirm-error"
     SECURITY_RESET_VIEW = "/reset-password"
-    SECURITY_RESET_ERROR_VIEW = "/reset-password"
+    SECURITY_RESET_ERROR_VIEW = "/reset-password-error"
+    SECURITY_LOGIN_ERROR_VIEW = "/login-error"
+    SECURITY_POST_OAUTH_LOGIN_VIEW = "/post-oauth-login"
     SECURITY_REDIRECT_BEHAVIOR = "spa"
 
     # CSRF protection is critical for all session-based browser UIs
@@ -79,11 +81,15 @@ The UI might want to run on port 8080. In order to test redirects you need to se
 
     SECURITY_REDIRECT_HOST = 'localhost:8080'
 
+.. tip::
+    The `logout` endpoint doesn't take a body - be sure to add `content_type="application/json"`
+    header to your POST("/logout") request so that no redirection is done.
+
 Client side authentication options
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Depending on your SPA architecture and vision you can choose between cookie or token based authentication.
 
-For both there is more documentation and some examples. In both cases, you need to understand and handle :ref:`csrftopic` concerns.
+For both there is more documentation and some examples. In both cases, you need to understand and handle :ref:`csrf_topic` concerns.
 
 Security Considerations
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -185,7 +191,7 @@ Some background material:
 .. _Single Page Applications (spa): https://en.wikipedia.org/wiki/Single-page_application
 .. _Nginx: https://www.nginx.com/
 .. _S3: https://www.savjee.be/2018/05/Content-security-policy-and-aws-s3-cloudfront/
-.. _Flask-Talisman: https://github.com/GoogleCloudPlatform/flask-talisman
+.. _Flask-Talisman: https://pypi.org/project/flask-talisman/
 .. _CORS: https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS
 .. _Flask-CORS: https://github.com/corydolphin/flask-cors
 .. _Zappa: https://github.com/Miserlou/Zappa

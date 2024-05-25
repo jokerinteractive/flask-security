@@ -2,22 +2,22 @@
     flask_security
     ~~~~~~~~~~~~~~
 
-    Flask-Security is a Flask extension that aims to add quick and simple
-    security via Flask-Login, Flask-Principal, Flask-WTF, and passlib.
+    Flask-Security is a Flask extension that aims to add comprehensive security
+    to Flask applications.
 
     :copyright: (c) 2012-2019 by Matt Wright.
-    :copyright: (c) 2019-2022 by J. Christopher Wagner.
+    :copyright: (c) 2019-2024 by J. Christopher Wagner.
     :license: MIT, see LICENSE for more details.
 """
 
 # flake8: noqa: F401
 from .changeable import admin_change_password
+from .change_email import ChangeEmailForm
 from .core import (
     Security,
     RoleMixin,
     UserMixin,
     WebAuthnMixin,
-    AnonymousUser,
     FormInfo,
     current_user,
 )
@@ -59,8 +59,9 @@ from .forms import (
     VerifyForm,
     unique_identity_attribute,
 )
-from .mail_util import MailUtil
+from .mail_util import MailUtil, EmailValidateException
 from .oauth_glue import OAuthGlue
+from .oauth_provider import FsOAuthProvider
 from .password_util import PasswordUtil
 from .phone_util import PhoneUtil
 from .recovery_codes import (
@@ -79,8 +80,10 @@ from .signals import (
     tf_security_token_sent,
     tf_disabled,
     user_authenticated,
+    user_unauthenticated,
     user_confirmed,
     user_registered,
+    user_not_registered,
     us_security_token_sent,
     us_profile_changed,
     wan_deleted,
@@ -110,6 +113,7 @@ from .utils import (
     login_user,
     logout_user,
     lookup_identity,
+    naive_utcnow,
     password_breached_validator,
     password_complexity_validator,
     password_length_validator,
@@ -133,4 +137,4 @@ from .webauthn import (
 )
 from .webauthn_util import WebauthnUtil
 
-__version__ = "5.1.0"
+__version__ = "5.4.4"

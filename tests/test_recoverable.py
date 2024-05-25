@@ -3,23 +3,32 @@
     ~~~~~~~~~~~~~~~~
 
     Recoverable functionality tests
+
+    :copyright: (c) 2019-2024 by J. Christopher Wagner (jwag).
+    :license: MIT, see LICENSE for more details.
 """
 
+from datetime import date, timedelta
 import re
-import time
 from urllib.parse import parse_qsl, urlsplit
 
 import pytest
 from flask import Flask
+from freezegun import freeze_time
+from wtforms.fields import StringField
+from wtforms.validators import Length
 from tests.test_utils import (
     authenticate,
     capture_flashes,
     capture_reset_password_requests,
+    check_location,
+    get_form_input,
     logout,
+    populate_data,
 )
 
-from flask_security.core import UserMixin
-from flask_security.forms import LoginForm
+from flask_security.core import Security, UserMixin
+from flask_security.forms import ForgotPasswordForm, LoginForm
 from flask_security.signals import password_reset, reset_password_instructions_sent
 
 pytestmark = pytest.mark.recoverable()
@@ -75,7 +84,7 @@ def test_recoverable_flag(app, clients, get_message):
         follow_redirects=True,
     )
 
-    assert get_message("PASSWORD_RESET") in response.data
+    assert get_message("PASSWORD_RESET_NO_LOGIN") in response.data
     assert len(recorded_resets) == 1
 
     logout(clients)
@@ -164,7 +173,6 @@ def test_recoverable_json(app, client, get_message):
         response = client.post(
             "/reset",
             json=dict(email="whoknows@lp.com"),
-            headers={"Content-Type": "application/json"},
         )
         assert response.status_code == 400
         assert response.json["response"]["errors"][0].encode("utf-8") == get_message(
@@ -174,7 +182,7 @@ def test_recoverable_json(app, client, get_message):
         # Test submitting a new password but leave out 'confirm'
         response = client.post(
             "/reset/" + token,
-            data='{"password": "newpassword"}',
+            json=dict(password="newpassword"),
             headers={"Content-Type": "application/json"},
         )
         assert response.status_code == 400
@@ -186,12 +194,8 @@ def test_recoverable_json(app, client, get_message):
         response = client.post(
             "/reset/" + token + "?include_auth_token",
             json=dict(password="awesome sunset", password_confirm="awesome sunset"),
-            headers={"Content-Type": "application/json"},
         )
-        assert all(
-            k in response.json["response"]["user"]
-            for k in ["email", "authentication_token"]
-        )
+        assert not response.json["response"]
         assert len(recorded_resets) == 1
 
         # reset automatically logs user in
@@ -266,7 +270,6 @@ def test_recover_invalidates_session(app, client):
         response = client.post(
             "/reset",
             json=dict(email="matt@lp.com"),
-            headers={"Content-Type": "application/json"},
         )
         assert response.headers["Content-Type"] == "application/json"
 
@@ -277,17 +280,13 @@ def test_recover_invalidates_session(app, client):
     response = client.post(
         "/reset/" + token + "?include_auth_token",
         json=dict(password="awesome sunset", password_confirm="awesome sunset"),
-        headers={"Content-Type": "application/json"},
     )
-    assert all(
-        k in response.json["response"]["user"]
-        for k in ["email", "authentication_token"]
-    )
+    assert response.status_code == 200
 
     # try to access protected endpoint with old session - shouldn't work
     response = other_client.get("/profile")
     assert response.status_code == 302
-    assert "/login?next=%2Fprofile" in response.location
+    assert response.location == "/login?next=/profile"
 
 
 def test_login_form_description(sqlalchemy_app):
@@ -300,13 +299,13 @@ def test_login_form_description(sqlalchemy_app):
 
 @pytest.mark.settings(reset_password_within="1 milliseconds")
 def test_expired_reset_token(client, get_message):
-    with capture_reset_password_requests() as requests:
-        client.post("/reset", data=dict(email="joe@lp.com"), follow_redirects=True)
+    # Note that we need relatively new-ish date since session cookies also expire.
+    with freeze_time(date.today() + timedelta(days=-1)):
+        with capture_reset_password_requests() as requests:
+            client.post("/reset", data=dict(email="joe@lp.com"), follow_redirects=True)
 
     user = requests[0]["user"]
     token = requests[0]["token"]
-
-    time.sleep(1)
 
     with capture_flashes() as flashes:
         msg = get_message(
@@ -391,7 +390,7 @@ def test_used_reset_token(client, get_message):
         follow_redirects=True,
     )
 
-    assert get_message("PASSWORD_RESET") in response.data
+    assert get_message("PASSWORD_RESET_NO_LOGIN") in response.data
 
     logout(client)
 
@@ -419,7 +418,7 @@ def test_reset_passwordless_user(client, get_message):
         follow_redirects=True,
     )
 
-    assert get_message("PASSWORD_RESET") in response.data
+    assert get_message("PASSWORD_RESET_NO_LOGIN") in response.data
 
 
 @pytest.mark.settings(reset_url="/custom_reset")
@@ -445,7 +444,7 @@ def test_custom_reset_templates(client):
 
 
 @pytest.mark.settings(
-    redirect_host="localhost:8081",
+    redirect_host="myui.com:8090",
     redirect_behavior="spa",
     reset_view="/reset-redirect",
 )
@@ -458,7 +457,6 @@ def test_spa_get(app, client):
         response = client.post(
             "/reset",
             json=dict(email="joe@lp.com"),
-            headers={"Content-Type": "application/json"},
         )
         assert response.headers["Content-Type"] == "application/json"
         assert "user" not in response.json["response"]
@@ -467,10 +465,11 @@ def test_spa_get(app, client):
     response = client.get("/reset/" + token)
     assert response.status_code == 302
     split = urlsplit(response.headers["Location"])
-    assert "localhost:8081" == split.netloc
+    assert "myui.com:8090" == split.netloc
     assert "/reset-redirect" == split.path
     qparams = dict(parse_qsl(split.query))
-    assert qparams["email"] == "joe@lp.com"
+    # we shouldn't be showing PII
+    assert "email" not in qparams
     assert qparams["token"] == token
 
 
@@ -483,16 +482,17 @@ def test_spa_get(app, client):
 def test_spa_get_bad_token(app, client, get_message):
     """Test expired and invalid token"""
     with capture_flashes() as flashes:
-        with capture_reset_password_requests() as requests:
-            response = client.post(
-                "/reset",
-                json=dict(email="joe@lp.com"),
-                headers={"Content-Type": "application/json"},
-            )
-            assert response.headers["Content-Type"] == "application/json"
-            assert "user" not in response.json["response"]
-        token = requests[0]["token"]
-        time.sleep(1)
+        # Note that we need relatively new-ish date since session cookies also expire.
+        with freeze_time(date.today() + timedelta(days=-1)):
+            with capture_reset_password_requests() as requests:
+                response = client.post(
+                    "/reset",
+                    json=dict(email="joe@lp.com"),
+                    headers={"Content-Type": "application/json"},
+                )
+                assert response.headers["Content-Type"] == "application/json"
+                assert "user" not in response.json["response"]
+            token = requests[0]["token"]
 
         response = client.get("/reset/" + token)
         assert response.status_code == 302
@@ -500,7 +500,10 @@ def test_spa_get_bad_token(app, client, get_message):
         assert "localhost:8081" == split.netloc
         assert "/reset-error" == split.path
         qparams = dict(parse_qsl(split.query))
-        assert all(k in qparams for k in ["email", "error", "identity"])
+        # on error - no PII should be returned.
+        assert "error" in qparams
+        assert "identity" not in qparams
+        assert "email" not in qparams
 
         msg = get_message(
             "PASSWORD_RESET_EXPIRED", within="1 milliseconds", email="joe@lp.com"
@@ -614,3 +617,180 @@ def test_generic_response(app, client, get_message):
     response = client.post("/reset", json=dict(email="whoami@test.com"))
     assert response.status_code == 200
     assert not any(e in response.json["response"].keys() for e in ["error", "errors"])
+
+
+def test_generic_with_extra(app, sqlalchemy_datastore):
+    # If application adds a field, make sure we properly return errors
+    # even if 'RETURN_GENERIC_RESPONSES' is set.
+    class MyForgotPasswordForm(ForgotPasswordForm):
+        recaptcha = StringField("Recaptcha", validators=[Length(min=5)])
+
+    app.config["SECURITY_RETURN_GENERIC_RESPONSES"] = True
+    app.config["SECURITY_FORGOT_PASSWORD_TEMPLATE"] = "generic_reset.html"
+    app.security = Security(
+        app,
+        datastore=sqlalchemy_datastore,
+        forgot_password_form=MyForgotPasswordForm,
+    )
+
+    populate_data(app)
+    client = app.test_client()
+
+    # Test valid user but invalid additional form field
+    # We should get a form error for the extra (invalid) field, no flash
+    bad_data = dict(email="joe@lp.com", recaptcha="1234")
+    good_data = dict(email="joe@lp.com", recaptcha="123456")
+
+    with capture_flashes() as flashes:
+        response = client.post("/reset", data=bad_data)
+        assert b"Field must be at least 5" in response.data
+    assert len(flashes) == 0
+    with capture_flashes() as flashes:
+        response = client.post("/reset", data=good_data)
+    assert len(flashes) == 1
+
+    # JSON
+    with capture_flashes() as flashes:
+        response = client.post("/reset", json=bad_data)
+        assert response.status_code == 400
+        assert (
+            "Field must be at least 5"
+            in response.json["response"]["field_errors"]["recaptcha"][0]
+        )
+    assert len(flashes) == 0
+    with capture_flashes() as flashes:
+        response = client.post("/reset", json=good_data)
+        assert response.status_code == 200
+    assert len(flashes) == 0
+
+    # Try bad email AND bad recaptcha
+    bad_data = dict(email="joe44-lp.com", recaptcha="1234")
+    with capture_flashes() as flashes:
+        response = client.post("/reset", data=bad_data)
+        assert b"Field must be at least 5" in response.data
+    assert len(flashes) == 0
+    with capture_flashes() as flashes:
+        response = client.post("/reset", json=bad_data)
+        assert response.status_code == 400
+        assert (
+            "Field must be at least 5"
+            in response.json["response"]["field_errors"]["recaptcha"][0]
+        )
+        assert len(response.json["response"]["errors"]) == 1
+    assert len(flashes) == 0
+
+
+@pytest.mark.filterwarnings("ignore")
+@pytest.mark.settings(auto_login_after_reset=True, post_reset_view="/post_reset")
+def test_auto_login(client, get_message):
+    # test backwards compat flag (not OWASP recommended)
+    with capture_reset_password_requests() as requests:
+        response = client.post(
+            "/reset", data=dict(email="joe@lp.com"), follow_redirects=True
+        )
+    assert response.status_code == 200
+    token = requests[0]["token"]
+
+    # Test submitting a new password
+    with capture_flashes() as flashes:
+        response = client.post(
+            "/reset/" + token,
+            data=dict(password="awesome sunset", password_confirm="awesome sunset"),
+            follow_redirects=True,
+        )
+        assert b"Post Reset" in response.data
+    assert len(flashes) == 1
+    assert get_message("PASSWORD_RESET") == flashes[0]["message"].encode("utf-8")
+
+    # verify actually logged in
+    response = client.get("/profile", follow_redirects=False)
+    assert response.status_code == 200
+
+
+@pytest.mark.filterwarnings("ignore")
+@pytest.mark.settings(auto_login_after_reset=True)
+def test_auto_login_json(client, get_message):
+    # test backwards compat flag (not OWASP recommended)
+    with capture_reset_password_requests() as requests:
+        response = client.post(
+            "/reset",
+            json=dict(email="joe@lp.com"),
+        )
+        assert response.headers["Content-Type"] == "application/json"
+
+    assert response.status_code == 200
+    token = requests[0]["token"]
+
+    # Test submitting a new password
+    response = client.post(
+        "/reset/" + token + "?include_auth_token",
+        json=dict(password="awesome sunset", password_confirm="awesome sunset"),
+    )
+    assert all(
+        k in response.json["response"]["user"]
+        for k in ["email", "authentication_token"]
+    )
+    # verify actually logged in
+    response = client.get("/profile", follow_redirects=False)
+    assert response.status_code == 200
+
+
+@pytest.mark.flask_async()
+@pytest.mark.settings()
+def test_recoverable_json_async(app, client, get_message):
+    recorded_resets = []
+    recorded_instructions_sent = []
+
+    @password_reset.connect_via(app)
+    async def on_password_reset(myapp, user):
+        recorded_resets.append(user)
+
+    @reset_password_instructions_sent.connect_via(app)
+    async def on_instructions_sent(myapp, **kwargs):
+        recorded_instructions_sent.append(kwargs["user"])
+
+    # Test reset password creates a token and sends email
+    with capture_reset_password_requests() as requests:
+        response = client.post(
+            "/reset",
+            json=dict(email="joe@lp.com"),
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert len(recorded_instructions_sent) == 1
+    assert response.status_code == 200
+    token = requests[0]["token"]
+
+    # Test submitting a new password
+    response = client.post(
+        "/reset/" + token + "?include_auth_token",
+        json=dict(password="awesome sunset", password_confirm="awesome sunset"),
+    )
+    assert not response.json["response"]
+    assert len(recorded_resets) == 1
+
+
+@pytest.mark.csrf()
+@pytest.mark.settings(post_reset_view="/post_reset_view")
+def test_csrf(app, client, get_message):
+    response = client.get("/reset")
+    csrf_token = get_form_input(response, "csrf_token")
+    with capture_reset_password_requests() as requests:
+        client.post(
+            "/reset",
+            data=dict(email="joe@lp.com", csrf_token=csrf_token),
+            follow_redirects=True,
+        )
+    token = requests[0]["token"]
+
+    # use the token - no CSRF so shouldn't work
+    data = {"password": "mypassword", "password_confirm": "mypassword"}
+    response = client.post(
+        "/reset/" + token,
+        data=data,
+    )
+    assert b"The CSRF token is missing" in response.data
+
+    data["csrf_token"] = csrf_token
+    response = client.post(f"/reset/{token}", data=data)
+    assert check_location(app, response.location, "/post_reset_view")

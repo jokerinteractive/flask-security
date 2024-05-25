@@ -5,7 +5,7 @@
     Lots of tests
 
     :copyright: (c) 2012 by Matt Wright.
-    :copyright: (c) 2019-2023 by J. Christopher Wagner (jwag).
+    :copyright: (c) 2019-2024 by J. Christopher Wagner (jwag).
     :license: MIT, see LICENSE for more details.
 """
 
@@ -14,8 +14,6 @@ import hashlib
 from unittest import mock
 import re
 import os.path
-import pkg_resources
-import sys
 import time
 import typing as t
 
@@ -27,6 +25,7 @@ from tests.test_utils import (
     authenticate,
     capture_flashes,
     capture_reset_password_requests,
+    check_location,
     check_xlation,
     get_csrf_token,
     init_app_with_options,
@@ -43,6 +42,7 @@ from flask_security.forms import (
     ChangePasswordForm,
     ConfirmRegisterForm,
     EmailField,
+    EmailValidation,
     ForgotPasswordForm,
     LoginForm,
     PasswordField,
@@ -53,7 +53,6 @@ from flask_security.forms import (
     SendConfirmationForm,
     StringField,
     email_required,
-    email_validator,
     valid_user_email,
 )
 from flask_security import auth_required, roles_required
@@ -66,7 +65,6 @@ from flask_security.utils import (
     send_mail,
     uia_email_mapper,
     uia_phone_mapper,
-    validate_redirect_url,
     verify_hash,
 )
 
@@ -125,7 +123,7 @@ def test_basic_custom_forms(app, sqlalchemy_datastore):
     class MyForgotPasswordForm(ForgotPasswordForm):
         email = EmailField(
             "My Forgot Email Address Field",
-            validators=[email_required, email_validator, valid_user_email],
+            validators=[email_required, EmailValidation(verify=True), valid_user_email],
         )
 
     class MyResetPasswordForm(ResetPasswordForm):
@@ -267,7 +265,7 @@ def test_passwordless_and_two_factor_configuration_mismatch(app, sqlalchemy_data
         init_app_with_options(
             app,
             sqlalchemy_datastore,
-            **{"SECURITY_TWO_FACTOR": True, "SECURITY_TWO_FACTOR_ENABLED_METHODS": []}
+            **{"SECURITY_TWO_FACTOR": True, "SECURITY_TWO_FACTOR_ENABLED_METHODS": []},
         )
 
 
@@ -295,7 +293,7 @@ def test_change_hash_type(app, sqlalchemy_datastore):
             "SECURITY_PASSWORD_HASH": "plaintext",
             "SECURITY_PASSWORD_SALT": None,
             "SECURITY_PASSWORD_SCHEMES": ["bcrypt", "plaintext"],
-        }
+        },
     )
 
     app.config["SECURITY_PASSWORD_HASH"] = "bcrypt"
@@ -353,25 +351,6 @@ def test_password_unicode_password_salt(client):
     assert response.status_code == 302
     response = authenticate(client, follow_redirects=True)
     assert b"Welcome matt@lp.com" in response.data
-
-
-@pytest.mark.filterwarnings(
-    "ignore:.*'unauthorized_handler' has been replaced.*:DeprecationWarning"
-)
-def test_set_unauthorized_handler(app, client):
-    @app.security.unauthorized_handler
-    def unauthorized():
-        app.unauthorized_handler_set = True
-        return "unauthorized-handler-set", 401
-
-    app.unauthorized_handler_set = False
-
-    authenticate(client, "joe@lp.com")
-    response = client.get("/admin", follow_redirects=True)
-
-    assert app.unauthorized_handler_set is True
-    assert b"unauthorized-handler-set" in response.data
-    assert response.status_code == 401
 
 
 @pytest.mark.registerable()
@@ -635,15 +614,31 @@ def test_xlation(app, client):
 def test_myxlation(app, sqlalchemy_datastore, pytestconfig):
     # Test changing a single MSG and having an additional translation dir
     # Flask-BabelEx doesn't support lists of directories..
-    try:
-        import flask_babelex  # noqa: F401
-
-        pytest.skip("Flask-BabelEx doesn't support lists of translations")
-    except ImportError:
-        pass
+    pytest.importorskip("flask_babel")
 
     i18n_dirname = [
-        pkg_resources.resource_filename("flask_security", "translations"),
+        "builtin",
+        os.path.join(pytestconfig.rootdir, "tests/translations"),
+    ]
+    init_app_with_options(
+        app, sqlalchemy_datastore, **{"SECURITY_I18N_DIRNAME": i18n_dirname}
+    )
+
+    assert check_xlation(app, "fr_FR"), "You must run python setup.py compile_catalog"
+
+    app.config["SECURITY_MSG_INVALID_PASSWORD"] = ("Password no-worky", "error")
+
+    client = app.test_client()
+    response = client.post("/login", data=dict(email="matt@lp.com", password="forgot"))
+    assert b"Passe - no-worky" in response.data
+
+
+@pytest.mark.babel()
+@pytest.mark.app_settings(babel_default_locale="fr_FR")
+def test_myxlation_complete(app, sqlalchemy_datastore, pytestconfig):
+    # Test having own translations and not using builtin.
+    pytest.importorskip("flask_babel")
+    i18n_dirname = [
         os.path.join(pytestconfig.rootdir, "tests/translations"),
     ]
     init_app_with_options(
@@ -794,7 +789,6 @@ def test_zxcvbn_xlate(app):
 """
 
 
-@pytest.mark.skipif(sys.version_info < (3, 0), reason="requires python3 or higher")
 @pytest.mark.settings(password_check_breached="strict")
 def test_breached(app, sqlalchemy_datastore):
     # partial response from: https://api.pwnedpasswords.com/range/07003
@@ -818,7 +812,6 @@ B3902FD808DCA504AAAD30F3C14BD3ACE7C:10"
             assert app.config["SECURITY_MSG_PASSWORD_BREACHED"][0] in pbad[0]
 
 
-@pytest.mark.skipif(sys.version_info < (3, 0), reason="requires python3 or higher")
 @pytest.mark.settings(
     password_check_breached="strict",
     password_breached_count=16,
@@ -893,10 +886,12 @@ def test_json_form_errors(app, client):
     """Test wtforms form level errors are correctly sent via json"""
     with app.test_request_context():
         form = ChangePasswordForm()
+        form.validate()
         form.form_errors.append("I am an error")
         response = base_render_json(form)
-        assert len(response.json["response"]["errors"]) == 1
-        assert response.json["response"]["errors"][0] == "I am an error"
+        error_list = response.json["response"]["errors"]
+        assert len(error_list) == 3
+        assert "I am an error" in error_list
 
 
 def test_method_view(app, client):
@@ -926,18 +921,25 @@ def test_method_view(app, client):
 
 
 def test_phone_util_override(app, sqlalchemy_datastore):
-    class MyPhoneUtil:
-        def __init__(self, app):
-            pass
+    from flask_security import phone_util
 
+    class MyPhoneUtil(phone_util.PhoneUtil):
         def validate_phone_number(self, input_data):
             return "call-me"
 
         def get_canonical_form(self, input_data):
             return "very-canonical"
 
-    app.security = Security()
-    app.security.init_app(app, sqlalchemy_datastore, phone_util_cls=MyPhoneUtil)
+    app.security = Security(phone_util_cls=MyPhoneUtil)
+    app.security.init_app(app, sqlalchemy_datastore)
+
+    with app.app_context():
+        assert uia_phone_mapper("55") == "very-canonical"
+
+    # try init_app kwargs
+    app.config["SECURITY_BLUEPRINT_NAME"] = "security2"
+    app.security2 = Security()
+    app.security2.init_app(app, sqlalchemy_datastore, phone_util_cls=MyPhoneUtil)
 
     with app.app_context():
         assert uia_phone_mapper("55") == "very-canonical"
@@ -969,9 +971,7 @@ def test_authn_freshness(
     with capture_flashes() as flashes:
         response = client.get("/myspecialview", follow_redirects=False)
         assert response.status_code == 302
-        assert (
-            "/verify?next=http%3A%2F%2Flocalhost%2Fmyspecialview" in response.location
-        )
+        assert response.location == "/verify?next=/myspecialview"
     assert flashes[0]["category"] == "error"
     assert flashes[0]["message"].encode("utf-8") == get_message(
         "REAUTHENTICATION_REQUIRED"
@@ -1051,7 +1051,7 @@ def test_default_authn_bp(app, client):
     reset_fresh(client, within=timedelta(minutes=1))
     response = client.get("/myview", follow_redirects=False)
     assert response.status_code == 302
-    assert "/myprefix/verify?next=http%3A%2F%2Flocalhost%2Fmyview" in response.location
+    assert response.location == "/myprefix/verify?next=/myview"
 
 
 def test_authn_freshness_grace(app, client, get_message):
@@ -1093,7 +1093,25 @@ def test_authn_freshness_nc(app, client_nc, get_message):
     # This should fail - should be a redirect
     response = client_nc.get("/myview", headers=h, follow_redirects=False)
     assert response.status_code == 302
-    assert "/verify?next=http%3A%2F%2Flocalhost%2Fmyview" in response.location
+    assert response.location == "/verify?next=/myview"
+
+
+@pytest.mark.two_factor()
+@pytest.mark.settings(freshness=timedelta(minutes=-1), multi_factor_recovery_codes=True)
+def test_authn_freshness_nc_no_fresh(app, client_nc, get_message):
+    # test disabling freshness when no session is sent.
+    response = json_authenticate(client_nc)
+    token = response.json["response"]["user"]["authentication_token"]
+    h = {"Authentication-Token": token}
+
+    # This should work
+    response = client_nc.get("/tf-setup", json={}, headers=h)
+    assert response.status_code == 200
+    assert not response.json["response"]["tf_required"]
+
+    response = client_nc.get("/mf-recovery-codes", json={}, headers=h)
+    assert response.status_code == 200
+    assert response.json["response"]["recovery_codes"] == []
 
 
 def test_verify_fresh(app, client, get_message):
@@ -1126,7 +1144,7 @@ def test_verify_fresh(app, client, get_message):
     response = client.post(
         verify_url, data=dict(password="password"), follow_redirects=False
     )
-    assert response.location == "http://localhost/fresh"
+    assert check_location(app, response.location, "/fresh")
 
     # should be fine now
     response = client.get("/fresh", follow_redirects=True)
@@ -1201,14 +1219,6 @@ def test_verify_next(app, client, get_message):
         follow_redirects=False,
     )
     assert response.location == "http://localhost/mynext"
-
-    response = client.post(
-        "/auth/?next=http%3A%2F%2F127.0.0.1%3A5000%2Fdashboard%2Fsettings%2F",
-        data=dict(password="password"),
-        follow_redirects=False,
-        base_url="http://127.0.0.1:5000",
-    )
-    assert response.location == "http://127.0.0.1:5000/dashboard/settings/"
 
 
 @pytest.mark.webauthn()
@@ -1303,7 +1313,7 @@ def test_post_security_with_application_root_and_views(app, sqlalchemy_datastore
             "APPLICATION_ROOT": "/root",
             "SECURITY_POST_LOGIN_VIEW": "/post_login",
             "SECURITY_POST_LOGOUT_VIEW": "/post_logout",
-        }
+        },
     )
     client = app.test_client()
 
@@ -1318,20 +1328,32 @@ def test_post_security_with_application_root_and_views(app, sqlalchemy_datastore
     assert "/post_logout" in response.location
 
 
-@pytest.mark.settings(redirect_validate_mode="regex")
-def test_validate_redirect(app, sqlalchemy_datastore):
+def test_open_redirect(app, client, get_message):
     """
     Test various possible URLs that urlsplit() shows as relative but
     many browsers will interpret as absolute - and thus have a
-    open-redirect vulnerability. Note this vulnerability only
-    is viable if the application sets autocorrect_location_header = False
+    open-redirect vulnerability.
     """
-    init_app_with_options(app, sqlalchemy_datastore)
-    with app.test_request_context("http://localhost:5001/login"):
-        assert not validate_redirect_url("\\\\\\github.com")
-        assert not validate_redirect_url(" //github.com")
-        assert not validate_redirect_url("\t//github.com")
-        assert not validate_redirect_url("//github.com")  # this is normal urlsplit
+    test_urls = [
+        ("\\\\\\github.com", "%5C%5C%5Cgithub.com"),
+        (" //github.com", "%20//github.com"),
+        (r"/\github.com", "/%5Cgithub.com"),
+        (r"\/github.com", "%5C/github.com"),
+        ("//github.com", ""),
+        ("\t//github.com", "%09//github.com"),
+    ]
+    for i, o in test_urls:
+        data = dict(email="matt@lp.com", password="password", next=i)
+        response = client.post("/login", data=data, follow_redirects=False)
+        if response.status_code == 302:
+            # this means it passed form validation but should have been quoted
+            assert check_location(app, response.location, o)
+        elif response.status_code == 200:
+            # should have failed form validation
+            assert get_message("INVALID_REDIRECT") in response.data
+        else:
+            raise AssertionError("Bad response code")
+        logout(client)
 
 
 def test_kwargs():
@@ -1414,3 +1436,70 @@ def test_multi_app(app, sqlalchemy_datastore):
 
     assert hasattr(security2.forms["register_form"].cls, "username")
     assert "username" in security2.user_identity_attributes[1].keys()
+
+
+@pytest.mark.registerable()
+def test_login_email_whatever(app, client, get_message):
+    # login, by default, shouldn't verify email address is deliverable..
+    # register etc can/should do that.
+    app.config["SECURITY_EMAIL_VALIDATOR_ARGS"] = {"check_deliverability": True}
+
+    # register should fail since non-deliverable TLD
+    data = dict(
+        email="dude@me.mytld",
+        password="awesome sunset",
+    )
+    response = client.post("/register", json=data)
+    assert response.status_code == 400
+    assert response.json["response"]["errors"][0].encode("utf-8") == get_message(
+        "INVALID_EMAIL_ADDRESS"
+    )
+
+    # login should work since we are just checking for identity
+    response = client.post(
+        "/login", data=dict(email="matt@lp.com", password="password")
+    )
+    assert response.status_code == 302
+    assert "/" in response.location
+
+
+@pytest.mark.skip
+def test_sqlalchemy_session_conn(request, app, tmpdir, realdburl):
+    # test harness for checking connection mgmt by logging all connections
+    from .conftest import sqlalchemy_session_setup
+
+    ds = sqlalchemy_session_setup(
+        request, app, tmpdir, realdburl, echo_pool="debug", echo="debug"
+    )
+    init_app_with_options(app, ds)
+    client = app.test_client()
+
+    client.post("/login", data=dict(email="matt@lp.com", password="password"))
+
+    client.post("/login", json=dict(noemail="matt@lp.com", password="password"))
+    time.sleep(5)
+
+
+def test_login_required(app, client, get_message):
+    # Test that @login_required calls our default_unauthn_handler
+    from flask_login import login_required
+
+    @app.route("/loginreq")
+    @login_required
+    def login_req():
+        pass
+
+    response = client.get("/loginreq", follow_redirects=False)
+    assert response.location == "/login?next=/loginreq"
+
+    response = client.get("/loginreq", follow_redirects=True)
+    assert get_message("UNAUTHENTICATED") in response.data
+
+
+def test_simplify_url():
+    from flask_security.utils import simplify_url
+
+    s = simplify_url("https://localhost/profile", "https://localhost/login")
+    assert s == "/login"
+    s = simplify_url("https:/myhost/profile", "https://localhost/login")
+    assert s == "https://localhost/login"

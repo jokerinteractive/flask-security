@@ -1,6 +1,10 @@
 Configuration
 =============
 
+.. warning::
+    Be sure to set all configuration (in app.config["xxx"]) *PRIOR* to instantiating
+    the Security class or calling security.init_app().
+
 The following configuration values are used by Flask-Security:
 
 Core
@@ -17,7 +21,7 @@ These configuration keys are used globally across all features.
 
     Specifies the name for the Flask-Security blueprint.
 
-    Default: ``security``.
+    Default: ``"security"``.
 
 .. py:data:: SECURITY_URL_PREFIX
 
@@ -57,14 +61,19 @@ These configuration keys are used globally across all features.
 
     Specifies the name for domain used for translations.
 
-    Default: ``flask_security``.
+    Default: ``"flask_security"``.
 .. py:data:: SECURITY_I18N_DIRNAME
 
     Specifies the directory containing the ``MO`` files used for translations.
     When using flask-babel this can also be a list of directory names - this
-    enables application to override a subset of messages if desired.
+    enables application to override a subset of messages if desired. The
+    default ``builtin`` uses translations shipped with Flask-Security.
 
-    Default: ``[PATH_LIB]/flask_security/translations``.
+    Default: ``"builtin"``.
+
+    .. versionchanged:: 5.2.0
+        "builtin" is a special name which will be interpreted as the ``translations``
+        directory within the installation of Flask-Security.
 
 .. py:data:: SECURITY_PASSWORD_HASH
 
@@ -72,11 +81,11 @@ These configuration keys are used globally across all features.
     Recommended values for production systems are ``bcrypt``, ``argon2``, ``sha512_crypt``, or
     ``pbkdf2_sha512``. Some algorithms require the installation  of a backend package (e.g. `bcrypt`_, `argon2`_).
 
-    Default:``bcrypt``.
+    Default: ``"bcrypt"``.
 
 .. py:data:: SECURITY_PASSWORD_SCHEMES
 
-    List of support password hash algorithms. ``SECURITY_PASSWORD_HASH``
+    List of supported password hash algorithms. ``SECURITY_PASSWORD_HASH``
     must be from this list. Passwords encrypted with any of these schemes will be honored.
 
 .. py:data:: SECURITY_DEPRECATED_PASSWORD_SCHEMES
@@ -99,7 +108,7 @@ These configuration keys are used globally across all features.
 .. py:data:: SECURITY_PASSWORD_SINGLE_HASH
 
     A list of schemes that should not be hashed twice. By default, passwords are
-    hashed twice, first with ``SECURITY_PASSWORD_SALT``, and then with a random salt.
+    hashed twice, first with :py:data:`SECURITY_PASSWORD_SALT`, and then with a random salt.
 
     Default: a list of known schemes not working with double hashing (`django_{digest}`, `plaintext`).
 
@@ -108,12 +117,12 @@ These configuration keys are used globally across all features.
     List of algorithms used for encrypting/hashing sensitive data within a token
     (Such as is sent with confirmation or reset password).
 
-    Default: ``sha256_crypt``.
+    Default: ``["sha256_crypt", "hex_md5"]``.
 .. py:data:: SECURITY_DEPRECATED_HASHING_SCHEMES
 
     List of deprecated algorithms used for creating and validating tokens.
 
-    Default: ``hex_md5``.
+    Default: ``["hex_md5"]``.
 
 .. py:data:: SECURITY_PASSWORD_HASH_OPTIONS
 
@@ -133,7 +142,7 @@ These configuration keys are used globally across all features.
 
     Minimum required length for passwords.
 
-    Default: 8
+    Default: ``8``
 
     .. versionadded:: 3.4.0
 .. py:data:: SECURITY_PASSWORD_COMPLEXITY_CHECKER
@@ -177,7 +186,7 @@ These configuration keys are used globally across all features.
     the NIST requirement: `5.1.1.2 Memorized Secret Verifiers`_.
     Normalization is performed using the Python unicodedata.normalize() method.
 
-    Default: "NFKD"
+    Default: ``"NFKD"``
 
     .. versionadded:: 4.0.0
 
@@ -199,13 +208,13 @@ These configuration keys are used globally across all features.
 
     Specifies the query string parameter to read when using token authentication.
 
-    Default: ``auth_token``.
+    Default: ``"auth_token"``.
 
 .. py:data:: SECURITY_TOKEN_AUTHENTICATION_HEADER
 
     Specifies the HTTP header to read when using token authentication.
 
-    Default: ``Authentication-Token``.
+    Default: ``"Authentication-Token"``.
 
 .. py:data:: SECURITY_TOKEN_MAX_AGE
 
@@ -213,13 +222,37 @@ These configuration keys are used globally across all features.
 
     Default: ``None``, meaning the token never expires.
 
+.. py:data:: SECURITY_TOKEN_EXPIRE_TIMESTAMP
+
+    A callable that returns a unix timestamp in the future when this specific
+    authentication token should expire. Returning 0 means no expiration.
+    It is passed the currently authenticated User so any fields can be used
+    to customize an expiration time. Of course it is called in a request
+    context so any information about the current request can also be used.
+
+    If BOTH this and :data:`SECURITY_TOKEN_MAX_AGE` are set - the shorter is used.
+
+    .. note::
+        These 2 expiry options work differently - with this one, the actual expire
+        timestamp is in the auth_token. The signed token (using itsdangerous)
+        has the timestamp the token was generated. On validation, that is checked
+        against ``SECURITY_TOKEN_MAX_AGE``. So for MAX_AGE, at the time of
+        validation, the token hasn't yet been associated with a User.
+
+    Default: ``lambda user: 0``
+
 .. py:data:: SECURITY_EMAIL_VALIDATOR_ARGS
 
-    Email address are validated using the `email_validator`_ package. Its methods
-    have some configurable options - these can be set here and will be passed in.
+    Email address are validated and normalized via the ``mail_util_cls`` which
+    defaults to :class:`.MailUtil`. That uses the `email_validator`_ package whose methods
+    have configurable options - these can be set here and will be passed in.
     For example setting this to: ``{"check_deliverability": False}`` is useful
     when unit testing if the emails are fake.
 
+    ``mail_util_cls`` has 2 methods - ``normalize`` and ``validate``. Both
+    ensure the passed value is a valid email address, and returns a normalized
+    version. ``validate`` additionally, by default, verifies that the email
+    address can likely actually receive an email.
 
     Default: ``None``, meaning use the defaults from email_validator package.
 
@@ -235,11 +268,23 @@ These configuration keys are used globally across all features.
 
 .. py:data:: SECURITY_REDIRECT_BEHAVIOR
 
-    Passwordless login, confirmation, reset password, unified signin, and oauth signin
+    Passwordless login, confirmation, reset password, unified signin, change_email, and oauth signin
     have GET endpoints that validate the passed token and redirect to an action form.
     For Single-Page-Applications style UIs which need to control their own internal URL routing these redirects
     need to not contain forms, but contain relevant information as query parameters.
-    Setting this to ``spa`` will enable that behavior.
+    Setting this to ``"spa"`` will enable that behavior.
+
+    When this is enabled, the following must also be defined:
+
+    - :py:data:`SECURITY_POST_OAUTH_LOGIN_VIEW`  (if :py:data:`SECURITY_OAUTH_ENABLE` is True)
+    - :py:data:`SECURITY_LOGIN_ERROR_VIEW`
+    - :py:data:`SECURITY_CONFIRM_ERROR_VIEW`
+    - :py:data:`SECURITY_POST_CHANGE_EMAIL_VIEW`
+    - :py:data:`SECURITY_CHANGE_EMAIL_ERROR_VIEW`
+    - :py:data:`SECURITY_POST_CONFIRM_VIEW`
+    - :py:data:`SECURITY_RESET_ERROR_VIEW`
+    - :py:data:`SECURITY_RESET_VIEW`
+
 
     Default: ``None`` which is existing html-style form redirects.
 
@@ -251,6 +296,10 @@ These configuration keys are used globally across all features.
     separately and is running on a different port than the
     Flask application. In order to test redirects, the `netloc`
     of the redirect URL needs to be rewritten. Setting this to e.g. `localhost:8080` does that.
+
+    .. tip::
+        Be aware that when this is set, any of the `*_VIEW` configuration variables that are set
+        to URLs and not endpoints, will be redirected to this host.
 
     Default: ``None``.
 
@@ -266,51 +315,6 @@ These configuration keys are used globally across all features.
     Default: ``False``.
 
     .. versionadded:: 4.0.0
-
-.. py:data:: SECURITY_REDIRECT_VALIDATE_MODE
-
-    These 2 configuration options attempt to solve a open-redirect vulnerability
-    that can be exploited if an application sets the Werkzeug response option
-    ``autocorrect_location_header = False`` (it is ``True`` by default).
-    For numerous views (e.g. /login) Flask-Security allows callers to specify
-    a redirect upon successful completion (via the ?next parameter). So it is
-    possible for a user to be tricked into logging in to a legitimate site
-    and then redirected to a malicious site. Flask-Security attempts to
-    verify that redirects are always relative to overcome this security concern.
-    FS uses the standard Python library urlsplit() to parse the URL and verify
-    that the ``netloc`` hasn't been altered.
-    However, many browsers actually accept URLs that should be considered
-    relative and perform various stripping and conversion that can cause them
-    to be interpreted as absolute. A trivial example of this is:
-
-    .. line-block::
-        /login?next=%20///github.com
-
-    This will pass the urlsplit() test that it is relative - but many browsers
-    will simply strip off the space and interpret it as an absolute URL!
-    With the default configuration of Werkzeug this isn't an issue since it by
-    default modifies the Location Header to with the request ``netloc``. However
-    if the application sets the Werkzeug response option
-    ``autocorrect_location_header = False`` this will allow a redirect outside of
-    the application.
-
-    Setting this to ``"regex"`` will force the URL to be matched using the
-    pattern specified below. If a match occurs the URL is considered 'absolute'
-    and will be rejected.
-
-    Default: ``None``
-
-    .. versionadded:: 4.0.2
-
-.. py:data:: SECURITY_REDIRECT_VALIDATE_RE
-
-    This regex handles known patterns that can be exploited. Basically,
-    don't allow control characters or white-space followed by slashes (or
-    back slashes).
-
-    Default: ``r"^/{4,}|\\{3,}|[\s\000-\037][/\\]{2,}"``
-
-    .. versionadded:: 4.0.2
 
 .. py:data:: SECURITY_CSRF_PROTECT_MECHANISMS
 
@@ -329,7 +333,7 @@ These configuration keys are used globally across all features.
 .. py:data:: SECURITY_CSRF_COOKIE_NAME
 
     The name for the CSRF cookie. This usually should be dictated by your
-    client-side code  - more information can be found at :ref:`csrftopic`
+    client-side code  - more information can be found at :ref:`csrf_topic`
 
     Default: ``None`` - meaning no cookie will be sent.
 
@@ -343,14 +347,14 @@ These configuration keys are used globally across all features.
 
     .. versionchanged:: 4.1.0
         The 'key' attribute was deprecated in favor of a separate configuration
-        variable ``SECURITY_CSRF_COOKIE_NAME``.
+        variable :data:`SECURITY_CSRF_COOKIE_NAME`.
 
 .. py:data:: SECURITY_CSRF_HEADER
 
     The HTTP Header name that will contain the CSRF token. ``X-XSRF-Token``
     is used by packages such as `axios`_.
 
-    Default: ``X-XSRF-Token``.
+    Default: ``"X-XSRF-Token"``.
 
 .. py:data:: SECURITY_CSRF_COOKIE_REFRESH_EACH_REQUEST
 
@@ -457,25 +461,9 @@ These configuration keys are used globally across all features.
     If set to ``True`` Flask-Security will return generic responses to endpoints
     that could be used to enumerate users. Please see :ref:`generic_responses`.
 
+    Default: ``False``
+
     .. versionadded:: 5.0.0
-
-.. py:data:: SECURITY_BACKWARDS_COMPAT_UNAUTHN
-
-    If set to ``True`` then the default behavior for authentication
-    failures from one of Flask-Security's decorators will be restored to
-    be compatible with releases prior to 3.3.0 (return 401 and some static html).
-
-    Default: ``False``.
-
-.. py:data:: SECURITY_BACKWARDS_COMPAT_AUTH_TOKEN
-
-    If set to ``True`` then an Authentication-Token will be returned
-    on every successful call to login, reset-password, change-password
-    as part of the JSON response. This was the default prior to release 3.3.0
-    - however sending Authentication-Tokens (which by default don't expire)
-    to session based UIs is a bad security practice.
-
-    Default: ``False``.
 
 Core - Multi-factor
 -------------------
@@ -533,7 +521,7 @@ These are used by the Two-Factor and Unified Signin features.
     unified sign in. All other phone numbers will require a region prefix to
     be accepted.
 
-    Default: ``US``
+    Default: ``"US"``
 
     .. versionadded:: 3.4.0
 
@@ -559,6 +547,11 @@ These are used by the Two-Factor and Unified Signin features.
     Setting this to 0 results in undefined behavior.
     Please see :meth:`flask_security.check_and_update_authn_fresh` for details.
 
+    .. note::
+        This stores freshness information in the session - which must be presented
+        (usually via a Cookie) to the above endpoints. To disable this, set it
+        to ``timedelta(minutes=-1)``
+
     Default: timedelta(hours=24)
 
     .. versionadded:: 3.4.0
@@ -572,6 +565,7 @@ These are used by the Two-Factor and Unified Signin features.
         - :py:data:`SECURITY_US_SETUP_URL`
         - :py:data:`SECURITY_TWO_FACTOR_SETUP_URL`
         - :py:data:`SECURITY_WAN_REGISTER_URL`
+        - :py:data:`SECURITY_MULTI_FACTOR_RECOVERY_CODES`
 
     N.B. To avoid strange behavior, be sure to set the grace period less than
     the freshness period.
@@ -581,15 +575,47 @@ These are used by the Two-Factor and Unified Signin features.
 
     .. versionadded:: 3.4.0
 
+Core - Compatibility
+---------------------
+These are flags that change various backwards compatability functionality.
+
+.. py:data:: SECURITY_ANONYMOUS_USER_DISABLED
+
+    If set to `True` then :data:`flask_security.current_user` will be `None` for unauthenticated
+    users instead of pointing to an AnonymousUser object. Note that Flask-Login intends
+    to deprecate the entire AnonymousUser concept.
+
+    Default: ``False``.
+
+    .. versionadded:: 5.4.0
+
+.. py:data:: SECURITY_BACKWARDS_COMPAT_UNAUTHN
+
+    If set to ``True`` then the default behavior for authentication
+    failures from one of Flask-Security's decorators will be restored to
+    be compatible with releases prior to 3.3.0 (return 401 and some static html).
+
+    Default: ``False``.
+
+.. py:data:: SECURITY_BACKWARDS_COMPAT_AUTH_TOKEN
+
+    If set to ``True`` then an Authentication-Token will be returned
+    on every successful call to login, reset-password, change-password
+    as part of the JSON response. This was the default prior to release 3.3.0
+    - however sending Authentication-Tokens (which by default don't expire)
+    to session based UIs is a bad security practice.
+
+    Default: ``False``.
 
 Core - rarely need changing
 ----------------------------
 
 .. py:data:: SECURITY_DATETIME_FACTORY
 
-    Specifies the default datetime factory.
+    Specifies the default datetime factory. The default is naive-UTC which
+    corresponds to many DB's DateTime type.
 
-    Default:``datetime.datetime.utcnow``.
+    Default:``flask_security.naive_utcnow``.
 
 .. py:data:: SECURITY_CONFIRM_SALT
 
@@ -644,13 +670,13 @@ Core - rarely need changing
 
     Specifies the name for the command managing users. Disable by setting ``False``.
 
-    Default: ``users``.
+    Default: ``"users"``.
 
 .. py:data:: SECURITY_CLI_ROLES_NAME
 
     Specifies the name for the command managing roles. Disable by setting ``False``.
 
-    Default: ``roles``.
+    Default: ``"roles"``.
 
 .. py:data:: SECURITY_JOIN_USER_ROLES
 
@@ -712,8 +738,8 @@ Login/Logout
 .. py:data:: SECURITY_UNAUTHORIZED_VIEW
 
     Specifies the view to redirect to if a user attempts to access a URL/endpoint that they do
-    not have permission to access. If this value is ``None``, the user is presented with a default
-    HTTP 403 response.
+    not have permission to access. This can be a callable (which returns a URL or ``None``) or an endpoint or a URL.
+    If this value is ``None`` or the configured callable returns ``None`` or empty, the user is presented with a default HTTP 403 response.
 
     Default: ``None``.
 
@@ -769,17 +795,17 @@ Registerable
 
     Sets the subject for the confirmation email.
 
-    Default: ``"Welcome"``.
+    Default: ``_("Welcome")``.
 .. py:data:: SECURITY_REGISTER_USER_TEMPLATE
 
     Specifies the path to the template for the user registration page.
 
-    Default: ``security/register_user.html``.
+    Default: ``"security/register_user.html"``.
 .. py:data:: SECURITY_POST_REGISTER_VIEW
 
     Specifies the view to redirect to after a user successfully registers.
     This value can be set to a URL or an endpoint name. If this value is
-    ``None``, the user is redirected to the value of ``SECURITY_POST_LOGIN_VIEW``.
+    ``None``, the user is redirected to the value of :data:`SECURITY_POST_LOGIN_VIEW`.
     Note that if the request URL or form has a ``next`` parameter, that will take precedence.
 
     Default: ``None``.
@@ -857,7 +883,7 @@ Confirmable
     Specifies the amount of time a user has before their confirmation
     link expires. Always pluralize the time unit for this value.
 
-    Default: ``5 days``.
+    Default: ``"5 days"``.
 .. py:data:: SECURITY_CONFIRM_URL
 
     Specifies the email confirmation URL.
@@ -867,18 +893,18 @@ Confirmable
 
     Specifies the path to the template for the resend confirmation instructions page.
 
-    Default: ``security/send_confirmation.html``.
+    Default: ``"security/send_confirmation.html"``.
 .. py:data:: SECURITY_EMAIL_SUBJECT_CONFIRM
 
     Sets the subject for the email confirmation message.
 
-    Default: ``Please confirm your email``.
+    Default: ``_("Please confirm your email")``.
 .. py:data:: SECURITY_CONFIRM_ERROR_VIEW
 
     Specifies the view to redirect to if a confirmation error occurs.
     This value can be set to a URL or an endpoint name.
     If this value is ``None``, the user is presented the default view
-    to resend a confirmation link. In the case of ``SECURITY_REDIRECT_BEHAVIOR`` == ``spa``
+    to resend a confirmation link. In the case of :py:data:`SECURITY_REDIRECT_BEHAVIOR` == ``"spa"``
     query params in the redirect will contain the error.
 
     Default: ``None``.
@@ -886,28 +912,28 @@ Confirmable
 
     Specifies the view to redirect to after a user successfully confirms their email.
     This value can be set to a URL or an endpoint name. If this value is ``None``, the user is redirected to the
-    value of ``SECURITY_POST_LOGIN_VIEW``.
+    value of :data:`SECURITY_POST_LOGIN_VIEW`.
 
     Default: ``None``.
 .. py:data:: SECURITY_AUTO_LOGIN_AFTER_CONFIRM
 
-    If ``False`` then on confirmation  the user will be required to login again.
-    Note that the confirmation token is not valid after being used once.
-    If ``True``, then the user corresponding to the
-    confirmation token will be automatically logged in.
+    If ``True``, then the user corresponding to the confirmation token will be automatically signed in.
+    If ``False`` (the default) then the user will be requires to authenticate using the usual mechanism(s).
+    Note that the confirmation token is not valid after being used once. This is not recommended by OWASP
+    however an application that is by invite only (no self-registration) might find this useful.
 
-    Default: ``True``.
+    Default: ``False``.
+
 .. py:data:: SECURITY_LOGIN_WITHOUT_CONFIRMATION
 
     Specifies if a user may login before confirming their email when
-    the value of ``SECURITY_CONFIRMABLE`` is set to ``True``.
+    the value of :data:`SECURITY_CONFIRMABLE` is set to ``True``.
 
     Default: ``False``.
 .. py:data:: SECURITY_REQUIRES_CONFIRMATION_ERROR_VIEW
 
     Specifies a redirect page if the users tries to login, reset password or us-signin with an unconfirmed account.
-    If an URL endpoint is specified, flashes an error messages and passes user email as an argument.
-    For us-signin, no argument is specified: it simply flashes the error message and redirects.
+    If an URL endpoint is specified, flashes an error messages and redirects.
     Default behavior is to reload the form with an error message without redirecting to an other page.
 
     Default: ``None``.
@@ -931,14 +957,14 @@ Configuration variables for the ``SECURITY_CHANGEABLE`` feature:
     Specifies the view to redirect to after a user successfully changes their password.
     This value can be set to a URL or an endpoint name.
     If this value is ``None``, the user is redirected  to the
-    value of ``SECURITY_POST_LOGIN_VIEW``.
+    value of :data:`SECURITY_POST_LOGIN_VIEW`.
 
     Default: ``None``.
 .. py:data:: SECURITY_CHANGE_PASSWORD_TEMPLATE
 
     Specifies the path to the template for the change password page.
 
-    Default: ``security/change_password.html``.
+    Default: ``"security/change_password.html"``.
 
 .. py:data:: SECURITY_SEND_PASSWORD_CHANGE_EMAIL
 
@@ -950,7 +976,7 @@ Configuration variables for the ``SECURITY_CHANGEABLE`` feature:
 
     Sets the subject for the password change notice.
 
-    Default: ``Your password has been changed``.
+    Default: ``_("Your password has been changed")``.
 
 Recoverable
 -----------
@@ -971,34 +997,50 @@ Recoverable
 
     Specifies the path to the template for the reset password page.
 
-    Default: ``security/reset_password.html``.
+    Default: ``"security/reset_password.html"``.
 
 .. py:data:: SECURITY_FORGOT_PASSWORD_TEMPLATE
 
     Specifies the path to the template for the forgot password page.
 
-    Default: ``security/forgot_password.html``.
+    Default: ``"security/forgot_password.html"``.
 
 .. py:data:: SECURITY_POST_RESET_VIEW
 
     Specifies the view to redirect to after a user successfully resets their password.
     This value can be set to a URL or an endpoint name. If this
-    value is ``None``, the user is redirected  to the value of ``SECURITY_POST_LOGIN_VIEW``.
+    value is ``None``, the user is redirected to the value of ``.login`` if
+    :py:data:`SECURITY_AUTO_LOGIN_AFTER_RESET` is ``False`` or :py:data:`SECURITY_POST_LOGIN_VIEW`
+    if ``True``
 
     Default: ``None``.
 
 .. py:data:: SECURITY_RESET_VIEW
 
     Specifies the view/URL to redirect to after a GET reset-password link.
-    This is only valid if ``SECURITY_REDIRECT_BEHAVIOR`` == ``spa``.
-    Query params in the redirect will contain the ``token`` and ``email``.
+    This is only valid if :py:data:`SECURITY_REDIRECT_BEHAVIOR` == ``"spa"``.
+    Query params in the redirect will contain the ``token``.
 
     Default: ``None``.
+
+.. py:data:: SECURITY_AUTO_LOGIN_AFTER_RESET
+
+    If ``False`` then on successful reset the user will be required to signin again.
+    Note that the reset token is not valid after being used once.
+    If ``True``, then the user corresponding to the
+    reset token will be automatically signed in. Note: auto-login is contrary
+    to OWASP best security practices. This option is for backwards compatibility
+    and is deprecated.
+
+    Default: ``False``.
+
+    .. versionadded:: 5.3.0
+    .. deprecated:: 5.3.0
 
 .. py:data:: SECURITY_RESET_ERROR_VIEW
 
     Specifies the view/URL to redirect to after a GET reset-password link when there is an error.
-    This is only valid if ``SECURITY_REDIRECT_BEHAVIOR`` == ``spa``.
+    This is only valid if :py:data:`SECURITY_REDIRECT_BEHAVIOR` == ``spa``.
     Query params in the redirect will contain the error.
 
     Default: ``None``.
@@ -1008,7 +1050,7 @@ Recoverable
     Specifies the amount of time a user has before their password reset link expires.
     Always pluralize the time unit for this value.
 
-    Default: ``5 days``.
+    Default: ``"1 days"``.
 
 .. py:data:: SECURITY_SEND_PASSWORD_RESET_EMAIL
 
@@ -1028,13 +1070,78 @@ Recoverable
 
     Sets the subject for the password reset email.
 
-    Default: ``Password reset instructions``.
+    Default: ``_("Password reset instructions")``.
 
 .. py:data:: SECURITY_EMAIL_SUBJECT_PASSWORD_NOTICE
 
     Sets subject for the password notice.
 
-    Default: ``Your password has been reset``.
+    Default: ``_("Your password has been reset")``.
+
+Change-Email
+------------
+.. versionadded:: 5.5.0
+
+.. py:data:: SECURITY_CHANGE_EMAIL
+
+    It ``True`` an endpoint is created that allows a user to change their email address.
+
+    Default: ``False``
+.. py:data:: SECURITY_CHANGE_EMAIL_SUBJECT
+
+    Sets the subject for the change email confirmation email.
+
+    Default: ``_("Confirm your new email address")``.
+.. py:data:: SECURITY_CHANGE_EMAIL_TEMPLATE
+
+    Specifies the path to the template for the change email page.
+
+    Default: ``"security/change_email.html"``.
+.. py:data:: SECURITY_CHANGE_EMAIL_WITHIN
+
+    Specifies the amount of time a user has before their change email
+    token expires. Always pluralize the time unit for this value.
+
+    Default: ``"2 hours"``
+.. py:data:: SECURITY_POST_CHANGE_EMAIL_VIEW
+
+    Specifies the view to redirect to after a user successfully confirms their new email address.
+    This value can be set to a URL or an endpoint name. If this value is
+    ``None``, the user is redirected to the value of :py:data:`SECURITY_POST_LOGIN_VIEW`.
+    Note that if the request URL or form has a ``next`` parameter, that will take precedence.
+    In the case of :py:data:`SECURITY_REDIRECT_BEHAVIOR` == ``"spa"`` this value must be set.
+
+    Default: ``None``.
+.. py:data:: SECURITY_CHANGE_EMAIL_ERROR_VIEW
+
+    Specifies the view to redirect to if a change email confirmation error occurs.
+    This value can be set to a URL or an endpoint name.
+    If this value is ``None``, the user is redirected back to the change_email page.
+    In the case of :py:data:`SECURITY_REDIRECT_BEHAVIOR` == ``"spa"``
+    this value must be set, and the query params in the redirect will contain the error.
+
+    Default: ``None``.
+.. py:data:: SECURITY_CHANGE_EMAIL_URL
+
+    Specifies the change-email endpoint URL.
+
+    Default: ``"/change-email"``.
+.. py:data:: SECURITY_CHANGE_EMAIL_CONFIRM_URL
+
+    Specifies the change-email confirmation endpoint URL. This is a GET
+    only endpoint (accessed via a link in an email).
+
+    Default: ``"/change-email-confirm"``.
+.. py:data:: SECURITY_EMAIL_CHANGE_SALT
+
+    Specifies the salt value when generating change email confirmation links/tokens.
+
+    Default: ``"change-email-salt"``.
+
+Additional relevant configuration variables:
+
+    - :py:data:`SECURITY_FRESHNESS` - Used to protect /change-email.
+    - :py:data:`SECURITY_FRESHNESS_GRACE_PERIOD` - Used to protect /change-email.
 
 Two-Factor
 -----------
@@ -1047,7 +1154,7 @@ Configuration related to the two-factor authentication feature.
     Specifies if Flask-Security should enable the two-factor login feature.
     If set to ``True``, in addition to their passwords, users will be required to
     enter a code that is sent to them. Note that unless
-    ``SECURITY_TWO_FACTOR_REQUIRED`` is set - this is opt-in.
+    :data:`SECURITY_TWO_FACTOR_REQUIRED` is set - this is opt-in.
 
     Default: ``False``.
 .. py:data:: SECURITY_TWO_FACTOR_REQUIRED
@@ -1097,28 +1204,28 @@ Configuration related to the two-factor authentication feature.
     Specifies the email address users send mail to when they can't complete the
     two-factor authentication login.
 
-    Default: ``no-reply@localhost``.
+    Default: ``"no-reply@localhost"``.
 
 .. py:data:: SECURITY_EMAIL_SUBJECT_TWO_FACTOR
 
     Sets the subject for the two factor feature.
 
-    Default: ``Two-factor Login``
+    Default: ``_("Two-factor Login")``
 .. py:data:: SECURITY_EMAIL_SUBJECT_TWO_FACTOR_RESCUE
 
     Sets the subject for the two factor help function.
 
-    Default: ``Two-factor Rescue``
+    Default: ``_("Two-factor Rescue")``
 .. py:data:: SECURITY_TWO_FACTOR_VERIFY_CODE_TEMPLATE
 
     Specifies the path to the template for the verify code page for the two-factor authentication process.
 
-    Default: ``security/two_factor_verify_code.html``.
+    Default: ``"security/two_factor_verify_code.html"``.
 .. py:data:: SECURITY_TWO_FACTOR_SETUP_TEMPLATE
 
     Specifies the path to the template for the setup page for the two factor authentication process.
 
-    Default: ``security/two_factor_setup.html``.
+    Default: ``"security/two_factor_setup.html"``.
 
 .. py:data:: SECURITY_TWO_FACTOR_SETUP_URL
 
@@ -1171,7 +1278,7 @@ Configuration related to the two-factor authentication feature.
     Specifies the path to the template for the select method page for the two-factor authentication process.
     This is used when more than one two-factor method has been setup (e.g. SMS and Webauthn).
 
-    Default: ``security/two_factor_select.html``.
+    Default: ``"security/two_factor_select.html"``.
 
     .. versionadded:: 5.0.0
 
@@ -1187,7 +1294,7 @@ Configuration related to the two-factor authentication feature.
 
     Specifies the expiration of the two factor validity cookie and verification of the token.
 
-    Default: ``30 Days``.
+    Default: ``"30 Days"``.
 
 
 .. py:data:: SECURITY_TWO_FACTOR_VALIDITY_COOKIE
@@ -1297,8 +1404,8 @@ Unified Signin
 .. py:data:: SECURITY_US_ENABLED_METHODS
 
     Specifies the default enabled methods for unified signin authentication.
-    Be aware that ``password`` only affects this ``SECURITY_US_SIGNIN_URL`` endpoint.
-    Removing it from here won't stop users from using the ``SECURITY_LOGIN_URL`` endpoint
+    Be aware that ``password`` only affects this :data:`SECURITY_US_SIGNIN_URL` endpoint.
+    Removing it from here won't stop users from using the :data:`SECURITY_LOGIN_URL` endpoint
     (unless you replace the login endpoint using :py:data:`SECURITY_US_SIGNIN_REPLACES_LOGIN`).
 
     This config variable defines which methods can be used to provide authentication data.
@@ -1332,7 +1439,7 @@ Unified Signin
     Specifies the amount of time a user has before their setup
     token expires. Always pluralize the time unit for this value.
 
-    Default: "30 minutes"
+    Default: ``"30 minutes"``
 
 .. py:data:: SECURITY_US_SIGNIN_REPLACES_LOGIN
 
@@ -1378,20 +1485,20 @@ This feature is DEPRECATED as of 5.0.0. Please use unified signin feature instea
     Specifies the path to the template for the send login instructions page for
     passwordless logins.
 
-    Default:``security/send_login.html``.
+    Default:``"security/send_login.html"``.
 
 .. py:data:: SECURITY_EMAIL_SUBJECT_PASSWORDLESS
 
     Sets the subject for the passwordless feature.
 
-    Default: ``Login instructions``.
+    Default: ``_("Login instructions")``.
 
 .. py:data:: SECURITY_LOGIN_WITHIN
 
     Specifies the amount of time a user has before a login link expires.
     Always pluralize the time unit for this value.
 
-    Default: ``1 days``.
+    Default: ``"1 days"``.
 
 .. py:data:: SECURITY_LOGIN_ERROR_VIEW
 
@@ -1402,7 +1509,7 @@ This feature is DEPRECATED as of 5.0.0. Please use unified signin feature instea
     * GET on oauthresponse where there was an OAuth protocol error.
     * GET on oauthresponse where the returned identity isn't registered.
 
-    This is only valid if :py:data:`SECURITY_REDIRECT_BEHAVIOR` == ``spa``.
+    This is only valid if :py:data:`SECURITY_REDIRECT_BEHAVIOR` == ``"spa"``.
     Query params in the redirect will contain the error.
 
     Default: ``None``.
@@ -1547,9 +1654,9 @@ WebAuthn
         - ``"secondary"`` - just keys registered as "secondary" are allowed
 
     If list is empty or ``None`` WebAuthn keys aren't allowed. This also means that the
-            :py:data:``SECURITY_WAN_VERIFY`` endpoint won't be registered.
+            :py:data:`SECURITY_WAN_VERIFY_URL` endpoint won't be registered.
 
-    Default:: ``["first", "secondary"]``
+    Default: ``["first", "secondary"]``
 
 
 Additional relevant configuration variables:
@@ -1652,18 +1759,31 @@ Social Oauth
 
     Default: ``"/login/oauthresponse"``
 
+.. py:data:: SECURITY_POST_OAUTH_LOGIN_VIEW
+
+    Specifies the view/URL to redirect to after a successful authentication (login)
+    using social oauth.
+    This is only valid if :py:data:`SECURITY_REDIRECT_BEHAVIOR` == ``"spa"``.
+    Query params in the redirect will contain `identity` and `email`.
+
+    Default: ``None``.
+
+    .. versionadded:: 5.4.0
+
+
 
 Feature Flags
 -------------
 All feature flags. By default all are 'False'/not enabled.
 
-* ``SECURITY_CONFIRMABLE``
-* ``SECURITY_REGISTERABLE``
-* ``SECURITY_RECOVERABLE``
-* ``SECURITY_TRACKABLE``
-* ``SECURITY_PASSWORDLESS``
-* ``SECURITY_CHANGEABLE``
-* ``SECURITY_TWO_FACTOR``
+* :py:data:`SECURITY_CHANGE_EMAIL`
+* :py:data:`SECURITY_CONFIRMABLE`
+* :py:data:`SECURITY_REGISTERABLE`
+* :py:data:`SECURITY_RECOVERABLE`
+* :py:data:`SECURITY_TRACKABLE`
+* :py:data:`SECURITY_PASSWORDLESS`
+* :py:data:`SECURITY_CHANGEABLE`
+* :py:data:`SECURITY_TWO_FACTOR`
 * :py:data:`SECURITY_UNIFIED_SIGNIN`
 * :py:data:`SECURITY_WEBAUTHN`
 * :py:data:`SECURITY_MULTI_FACTOR_RECOVERY_CODES`
@@ -1673,13 +1793,15 @@ URLs and Views
 --------------
 A list of all URLs and Views:
 
-* ``SECURITY_LOGIN_URL``
-* ``SECURITY_LOGOUT_URL``
+* :py:data:`SECURITY_LOGIN_URL`
+* :py:data:`SECURITY_LOGOUT_URL`
 * :py:data:`SECURITY_VERIFY_URL`
-* ``SECURITY_REGISTER_URL``
-* ``SECURITY_RESET_URL``
-* ``SECURITY_CHANGE_URL``
-* ``SECURITY_CONFIRM_URL``
+* :py:data:`SECURITY_REGISTER_URL`
+* :py:data:`SECURITY_CHANGE_EMAIL_URL`
+* :py:data:`SECURITY_CHANGE_EMAIL_CONFIRM_URL`
+* :py:data:`SECURITY_RESET_URL`
+* :py:data:`SECURITY_CHANGE_URL`
+* :py:data:`SECURITY_CONFIRM_URL`
 * :py:data:`SECURITY_MULTI_FACTOR_RECOVERY_CODES_URL`
 * :py:data:`SECURITY_MULTI_FACTOR_RECOVERY_URL`
 * :py:data:`SECURITY_OAUTH_START_URL`
@@ -1690,17 +1812,18 @@ A list of all URLs and Views:
 * :py:data:`SECURITY_TWO_FACTOR_RESCUE_URL`
 * :py:data:`SECURITY_TWO_FACTOR_ERROR_VIEW`
 * :py:data:`SECURITY_TWO_FACTOR_POST_SETUP_VIEW`
-* ``SECURITY_POST_LOGIN_VIEW``
-* ``SECURITY_POST_LOGOUT_VIEW``
-* ``SECURITY_CONFIRM_ERROR_VIEW``
-* ``SECURITY_POST_REGISTER_VIEW``
-* ``SECURITY_POST_CONFIRM_VIEW``
-* ``SECURITY_POST_RESET_VIEW``
-* ``SECURITY_POST_CHANGE_VIEW``
-* ``SECURITY_UNAUTHORIZED_VIEW``
-* ``SECURITY_RESET_VIEW``
-* ``SECURITY_RESET_ERROR_VIEW``
-* ``SECURITY_LOGIN_ERROR_VIEW``
+* :py:data:`SECURITY_POST_LOGIN_VIEW`
+* :py:data:`SECURITY_POST_LOGOUT_VIEW`
+* :py:data:`SECURITY_CONFIRM_ERROR_VIEW`
+* :py:data:`SECURITY_POST_REGISTER_VIEW`
+* :py:data:`SECURITY_POST_CONFIRM_VIEW`
+* :py:data:`SECURITY_POST_RESET_VIEW`
+* :py:data:`SECURITY_POST_CHANGE_VIEW`
+* :py:data:`SECURITY_POST_OAUTH_LOGIN_VIEW`
+* :py:data:`SECURITY_UNAUTHORIZED_VIEW`
+* :py:data:`SECURITY_RESET_VIEW`
+* :py:data:`SECURITY_RESET_ERROR_VIEW`
+* :py:data:`SECURITY_LOGIN_ERROR_VIEW`
 * :py:data:`SECURITY_US_SIGNIN_URL`
 * :py:data:`SECURITY_US_SETUP_URL`
 * :py:data:`SECURITY_US_SIGNIN_SEND_CODE_URL`
@@ -1724,6 +1847,7 @@ A list of all templates:
 * :py:data:`SECURITY_REGISTER_USER_TEMPLATE`
 * :py:data:`SECURITY_RESET_PASSWORD_TEMPLATE`
 * :py:data:`SECURITY_CHANGE_PASSWORD_TEMPLATE`
+* :py:data:`SECURITY_CHANGE_EMAIL_TEMPLATE`
 * :py:data:`SECURITY_MULTI_FACTOR_RECOVERY_TEMPLATE`
 * :py:data:`SECURITY_MULTI_FACTOR_RECOVERY_CODES_TEMPLATE`
 * :py:data:`SECURITY_SEND_CONFIRMATION_TEMPLATE`
@@ -1749,6 +1873,9 @@ The default messages and error levels can be found in ``core.py``.
 * ``SECURITY_MSG_ALREADY_CONFIRMED``
 * ``SECURITY_MSG_API_ERROR``
 * ``SECURITY_MSG_ANONYMOUS_USER_REQUIRED``
+* ``SECURITY_MSG_CHANGE_EMAIL_EXPIRED``
+* ``SECURITY_MSG_CHANGE_EMAIL_CONFIRMED``
+* ``SECURITY_MSG_CHANGE_EMAIL_SENT``
 * ``SECURITY_MSG_CODE_HAS_BEEN_SENT``
 * ``SECURITY_MSG_CONFIRMATION_EXPIRED``
 * ``SECURITY_MSG_CONFIRMATION_REQUEST``
@@ -1777,7 +1904,7 @@ The default messages and error levels can be found in ``core.py``.
 * ``SECURITY_MSG_LOGIN``
 * ``SECURITY_MSG_LOGIN_EMAIL_SENT``
 * ``SECURITY_MSG_LOGIN_EXPIRED``
-* ``SECURITY_NO_RECOVERY_CODES_SETUP``
+* ``SECURITY_MSG_NO_RECOVERY_CODES_SETUP``
 * ``SECURITY_MSG_OAUTH_HANDSHAKE_ERROR``
 * ``SECURITY_MSG_PASSWORDLESS_LOGIN_SUCCESSFUL``
 * ``SECURITY_MSG_PASSWORD_BREACHED``
@@ -1790,6 +1917,7 @@ The default messages and error levels can be found in ``core.py``.
 * ``SECURITY_MSG_PASSWORD_REQUIRED``
 * ``SECURITY_MSG_PASSWORD_RESET``
 * ``SECURITY_MSG_PASSWORD_RESET_EXPIRED``
+* ``SECURITY_MSG_PASSWORD_RESET_NO_LOGIN``
 * ``SECURITY_MSG_PASSWORD_RESET_REQUEST``
 * ``SECURITY_MSG_PASSWORD_TOO_SIMPLE``
 * ``SECURITY_MSG_PHONE_INVALID``

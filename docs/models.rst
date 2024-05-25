@@ -3,12 +3,17 @@
 Models
 ======
 
+Basics
+------
+
 Flask-Security assumes you'll be using libraries such as SQLAlchemy,
 MongoEngine, Peewee or PonyORM to define a `User`
 and `Role` data model. The fields on your models must follow a particular convention
 depending on the functionality your app requires. Aside from this, you're free
 to add any additional fields to your model(s) if you want.
 
+Packaged Models
+----------------
 As more features are added to Flask-Security, the list of required fields and tables grow.
 As you use these features, and therefore require these fields and tables, database migrations are required;
 which are a bit of a pain. To make things easier - Flask-Security includes mixins that
@@ -20,12 +25,22 @@ be easily extended to add any sort of custom fields and can be found in the
 The provided models are versioned since they represent actual DB models, and any
 changes require a schema migration (and perhaps a data migration). Applications
 must specifically import the version they want (and handle any required migration).
+Your application code should import just the required version e.g.::
+
+    from flask_security.models import fsqla_v3 as fsqla
+
+
+A single method ``fsqla.FsModels.set_db_info`` is provided to glue the supplied models to your
+DB instance. This is only needed if you use the packaged models.
+
+Model Specification
+-------------------
 
 Your `User` model needs a Primary Key - Flask-Security doesn't actually reference
 this - so it can be any name or type your application needs. It should be used in the
 foreign relationship between `User` and `Role`. The `WebAuthn` model also
 references this primary key (which can be overridden by providing a
-suitable implementation of ``get_user_mapping``).
+suitable implementation of :py:meth:`flask_security.WebAuthnMixin.get_user_mapping`).
 
 At the bare minimum your `User` and `Role` model should include the following fields:
 
@@ -49,21 +64,24 @@ Additional Functionality
 ------------------------
 
 Depending on the application's configuration, additional fields may need to be
-added to your `User` model.
+added to your database models. Note some fields are specified as 'list of string'
+the ORM you are using is responsible for translating the list of string to a suitable
+DB data type. For standard SQL-like databases, Flask-Security provides a utility
+method :class:`.AsaList`.
 
 Confirmable
 ^^^^^^^^^^^
 
 If you enable account confirmation by setting your application's
-`SECURITY_CONFIRMABLE` configuration value to `True`, your `User` model will
-require the following additional field:
+:py:data:`SECURITY_CONFIRMABLE` or :py:data:`SECURITY_CHANGE_EMAIL` configuration value to `True`,
+your `User` model will require the following additional field:
 
 * ``confirmed_at`` (datetime)
 
 Trackable
 ^^^^^^^^^
 
-If you enable user tracking by setting your application's `SECURITY_TRACKABLE`
+If you enable user tracking by setting your application's :py:data:`SECURITY_TRACKABLE`
 configuration value to `True`, your `User` model will require the following
 additional fields:
 
@@ -76,14 +94,14 @@ additional fields:
 Two_Factor
 ^^^^^^^^^^
 
-If you enable two-factor by setting your application's `SECURITY_TWO_FACTOR`
+If you enable two-factor by setting your application's :py:data:`SECURITY_TWO_FACTOR`
 configuration value to `True`, your `User` model will require the following
 additional fields:
 
 * ``tf_totp_secret`` (string, 255 bytes, nullable)
 * ``tf_primary_method`` (string)
 
-If you include 'sms' in `SECURITY_TWO_FACTOR_ENABLED_METHODS`, your `User` model
+If you include 'sms' in :py:data:`SECURITY_TWO_FACTOR_ENABLED_METHODS`, your `User` model
 will require the following additional field:
 
 * ``tf_phone_number`` (string, 128 bytes, nullable)
@@ -103,14 +121,14 @@ will require the following additional field:
 * ``us_phone_number`` (string, 64 bytes, nullable, unique)
 
 Separate Identity Domains
-~~~~~~~~~~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^^^^^^^^^^
 If you want authentication tokens to not be invalidated when the user changes their
 password add the following to your `User` model:
 
 * ``fs_token_uniquifier`` (string, 64 bytes, unique, non-nullable)
 
 Username
-~~~~~~~~~
+^^^^^^^^
 If you set :py:data:`SECURITY_USERNAME_ENABLE` to `True`, then your `User` model
 requires the following additional field:
 
@@ -122,6 +140,8 @@ If you want to protect endpoints with permissions, and assign permissions to rol
 that are then assigned to users, the ``Role`` model requires:
 
 * ``permissions`` (list of UnicodeText, nullable)
+
+.. _webauthn_model:
 
 WebAuthn
 ^^^^^^^^
@@ -174,13 +194,17 @@ the User record (since we need to look up the ``User`` based on a WebAuthn ``cre
     Add the following to the WebAuthn model:
 
         user = ReferenceField("User")
-        def get_user_mapping(self) -> t.Dict[str, str]:
+        def get_user_mapping(self) -> dict[str, str]:
             """Return the mapping from webauthn back to User"""
             return dict(id=self.user.id)
 
     Add the following to the User model:
 
         webauthn = ListField(ReferenceField(WebAuthn, reverse_delete_rule=PULL), default=[])
+
+    To make sure all WebAuthn objects are deleted if the User is deleted:
+
+        User.register_delete_rule(WebAuthn, "user", CASCADE)
 
 
 **For peewee**::

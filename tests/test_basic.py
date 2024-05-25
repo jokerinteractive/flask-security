@@ -1,29 +1,37 @@
 """
-    test_common
+    test_basic
     ~~~~~~~~~~~
 
     Test common functionality
 
-    :copyright: (c) 2019-2022 by J. Christopher Wagner (jwag).
+    :copyright: (c) 2019-2024 by J. Christopher Wagner (jwag).
     :license: MIT, see LICENSE for more details.
 """
 
 import base64
+from datetime import datetime, timedelta, timezone
 import json
 import re
-from http.cookiejar import Cookie
 import pytest
 
-from flask import Blueprint
+from flask import Blueprint, g
 
 from flask_security import uia_email_mapper
+from flask_security.decorators import auth_required
+from flask_principal import identity_loaded
+from freezegun import freeze_time
 
 from tests.test_utils import (
     authenticate,
+    capture_flashes,
+    check_location,
     get_auth_token_version_3x,
     get_form_action,
+    get_form_input,
     get_num_queries,
     hash_password,
+    init_app_with_options,
+    is_authenticated,
     json_authenticate,
     logout,
     populate_data,
@@ -37,6 +45,14 @@ def test_login_view(client):
 
 
 def test_authenticate(client):
+    response = authenticate(client)
+    assert response.status_code == 302
+    response = authenticate(client, follow_redirects=True)
+    assert b"Welcome matt@lp.com" in response.data
+
+
+@pytest.mark.settings(anonymous_user_disabled=True)
+def test_authenticate_no_anon(client):
     response = authenticate(client)
     assert response.status_code == 302
     response = authenticate(client, follow_redirects=True)
@@ -69,16 +85,58 @@ def test_authenticate_with_invalid_next(client, get_message):
     assert get_message("INVALID_REDIRECT") in response.data
 
 
+@pytest.mark.settings(flash_messages=False)
+def test_authenticate_with_invalid_next_json(client, get_message):
+    data = dict(email="matt@lp.com", password="password")
+    response = client.post("/login?next=http://google.com", json=data)
+    assert response.json["response"]["errors"][0].encode() == get_message(
+        "INVALID_REDIRECT"
+    )
+
+
 def test_authenticate_with_invalid_malformed_next(client, get_message):
     data = dict(email="matt@lp.com", password="password")
     response = client.post("/login?next=http:///google.com", data=data)
     assert get_message("INVALID_REDIRECT") in response.data
 
 
+def test_unauthenticated(app, client, get_message):
+    from flask_security import user_unauthenticated
+    from flask import request
+
+    recvd = []
+
+    @user_unauthenticated.connect_via(app)
+    def un(myapp, **extra):
+        assert request.path == "/profile"
+        recvd.append("gotit")
+
+    response = client.get("/profile", follow_redirects=False)
+    assert len(recvd) == 1
+    assert response.location == "/login?next=/profile"
+
+
+@pytest.mark.flask_async()
+def test_unauthenticated_async(app, client, get_message):
+    from flask_security import user_unauthenticated
+    from flask import request
+
+    recvd = []
+
+    @user_unauthenticated.connect_via(app)
+    async def un(myapp, **extra):
+        assert request.path == "/profile"
+        recvd.append("gotit")
+
+    response = client.get("/profile", follow_redirects=False)
+    assert len(recvd) == 1
+    assert response.location == "/login?next=/profile"
+
+
 def test_login_template_next(client):
     # Test that our login template propagates next.
     response = client.get("/profile", follow_redirects=True)
-    assert "?next=%2Fprofile" in response.request.url
+    assert "?next=/profile" in response.request.url
     login_url = get_form_action(response)
     response = client.post(
         login_url,
@@ -181,13 +239,13 @@ def test_login_form_username(client):
 
 
 @pytest.mark.settings(username_enable=True, username_required=True)
-def test_login_form_username_required(client):
+def test_login_form_username_required(app, client):
     # If username required - we should still be able to login with email alone
     # given default user_identity_attributes
     response = client.post(
         "/login", data=dict(email="matt@lp.com", password="password")
     )
-    assert response.location == "/"
+    assert check_location(app, response.location, "/")
 
 
 @pytest.mark.confirmable()
@@ -205,9 +263,9 @@ def test_generic_response(app, client, get_message):
     response = client.post(
         "/login", json=dict(email="mattwho@lp.com", password="forgot")
     )
-    # make sure just 'null' key in errors.
-    assert list(response.json["response"]["field_errors"].keys()) == ["null"]
-    assert len(response.json["response"]["field_errors"]["null"]) == 1
+    # make sure no field error key.
+    assert list(response.json["response"]["field_errors"].keys()) == [""]
+    assert len(response.json["response"]["field_errors"][""]) == 1
     assert response.json["response"]["errors"][0].encode("utf-8") == get_message(
         "GENERIC_AUTHN_FAILED"
     )
@@ -217,12 +275,14 @@ def test_generic_response(app, client, get_message):
     )
 
     # make sure don't get confirmation required
-    response = client.post(
-        "/login",
-        data=dict(email="mattwho@lp.com", password="password"),
-        follow_redirects=False,
-    )
-    assert response.status_code == 200
+    with capture_flashes() as flashes:
+        response = client.post(
+            "/login",
+            data=dict(email="mattwho@lp.com", password="password"),
+            follow_redirects=False,
+        )
+        assert response.status_code == 200
+    assert len(flashes) == 0
 
 
 @pytest.mark.registerable()
@@ -244,9 +304,9 @@ def test_generic_response_username(app, client, get_message):
     assert get_message("GENERIC_AUTHN_FAILED") in response.data
 
     response = client.post("/login", json=dict(username="dude2", password="forgot"))
-    # make sure just 'null' key in errors.
-    assert list(response.json["response"]["field_errors"].keys()) == ["null"]
-    assert len(response.json["response"]["field_errors"]["null"]) == 1
+    # make sure no field error key.
+    assert list(response.json["response"]["field_errors"].keys()) == [""]
+    assert len(response.json["response"]["field_errors"][""]) == 1
     assert response.json["response"]["errors"][0].encode("utf-8") == get_message(
         "GENERIC_AUTHN_FAILED"
     )
@@ -293,10 +353,11 @@ def test_inactive_forbids(app, client, get_message):
         app.security.datastore.deactivate_user(user)
         app.security.datastore.commit()
 
-    response = client.get("/profile", follow_redirects=True)
+    response = client.get("/profile", follow_redirects=False)
+    print(response.data)
     # should be thrown back to login page.
-    assert response.status_code == 200
-    assert b"Please log in to access this page" in response.data
+    assert response.status_code == 302
+    assert response.location == "/login?next=/profile"
 
 
 @pytest.mark.settings(unauthorized_view=None)
@@ -348,7 +409,7 @@ def test_inactive_forbids_basic(app, client, get_message):
             % base64.b64encode(b"joe@lp.com:password").decode("utf-8")
         },
     )
-    assert b"You are not authenticated" in response.data
+    assert get_message("UNAUTHENTICATED")[0] in response.data
 
 
 def test_unset_password(client, get_message):
@@ -385,7 +446,7 @@ def test_logout_with_next(client):
 
 def test_missing_session_access(client, get_message):
     response = client.get("/profile", follow_redirects=True)
-    assert get_message("LOGIN") in response.data
+    assert get_message("UNAUTHENTICATED") in response.data
 
 
 def test_has_session_access(client):
@@ -406,34 +467,64 @@ def test_unauthorized_access(client, get_message):
     assert response.status_code == 403
 
 
-@pytest.mark.settings(unauthorized_view=lambda: None)
-def test_unauthorized_access_with_referrer(client, get_message):
-    authenticate(client, "joe@lp.com")
-    response = client.get("/admin", headers={"referer": "/admin"})
-    assert response.location != "/admin"
-    client.get(response.location)
+def test_unauthorized_callable_view(app, sqlalchemy_datastore, get_message):
+    # Test various options using custom unauthorized view
+    def unauthz_view():
+        from flask import request
 
-    response = client.get(
-        "/admin?a=b", headers={"referer": "http://localhost/admin?x=y"}
-    )
-    assert "/" in response.location
-    client.get(response.headers["Location"])
+        if request.path == "/admin":
+            return None
+        elif request.path == "/admin_perm":
+            return ""
+        elif request.path == "/admin_and_editor":
+            return "/profile"
+        elif request.path == "/simple":
+            # N.B. security issue - app should verify this is local
+            return request.referrer
+        else:
+            return "not_implemented"
 
-    response = client.get(
-        "/admin", headers={"referer": "/admin"}, follow_redirects=True
-    )
+    app.config["SECURITY_UNAUTHORIZED_VIEW"] = unauthz_view
+    init_app_with_options(app, sqlalchemy_datastore)
+    client = app.test_client()
+    # activate tiya
+    with app.test_request_context("/"):
+        user = app.security.datastore.find_user(email="tiya@lp.com")
+        app.security.datastore.activate_user(user)
+        app.security.datastore.commit()
+    authenticate(client, "tiya@lp.com")
+    assert is_authenticated(client, get_message)
+
+    response = client.get("/admin")
+    assert response.status_code == 403
+    response = client.get("/admin_perm")
+    assert response.status_code == 403
+
+    response = client.get("/admin_and_editor", follow_redirects=False)
+    assert check_location(app, response.location, "/profile")
+    response = client.get(response.location)
     assert response.data.count(get_message("UNAUTHORIZED")) == 1
 
-    # When referrer is from another path and unauthorized,
-    # we expect a temp redirect (302) to the referer
-    response = client.get("/admin?w=s", headers={"referer": "/profile"})
+    response = client.get(
+        "/simple", headers={"referer": "/myhome"}, follow_redirects=False
+    )
+    assert check_location(app, response.location, "/myhome")
+
+
+def test_unauthorized_url_view(app, sqlalchemy_datastore):
+    # Test unknown endpoint basically results in redirect to the given string.
+    app.config["SECURITY_UNAUTHORIZED_VIEW"] = ".myendpoint"
+    init_app_with_options(app, sqlalchemy_datastore)
+    client = app.test_client()
+    authenticate(client, "tiya@lp.com")
+    response = client.get("/admin")
     assert response.status_code == 302
-    assert "/profile" in response.location
+    check_location(app, response.location, ".myendpoint")
 
 
 @pytest.mark.settings(unauthorized_view="/unauthz")
 def test_roles_accepted(clients):
-    # This specificaly tests that we can pass a URL for unauthorized_view.
+    # This specifically tests that we can pass a URL for unauthorized_view.
     for user in ("matt@lp.com", "joe@lp.com"):
         authenticate(clients, user)
         response = clients.get("/admin_or_editor")
@@ -528,12 +619,86 @@ def test_token_auth_via_header_invalid_token(client):
     assert response.status_code == 401
 
 
-def test_http_auth(client):
+def test_token_auth_invalid_for_session_auth(client):
+    # when user is loaded from token data, session authentication should fail.
+    response = json_authenticate(client)
+    token = response.json["response"]["user"]["authentication_token"]
+    # logout so session doesn't contain valid user details
+    logout(client)
+    headers = {"Authentication-Token": token, "Accept": "application/json"}
+    response = client.get("/session", headers=headers)
+    assert response.status_code == 401
+
+
+def test_per_user_expired_token(app, client_nc):
+    # Test expiry in auth_token using callable
+    with freeze_time("2024-01-01"):
+
+        def exp(user):
+            assert user.email == "matt@lp.com"
+            return int((datetime.now(timezone.utc) + timedelta(days=1)).timestamp())
+
+        app.config["SECURITY_TOKEN_EXPIRE_TIMESTAMP"] = exp
+
+        response = json_authenticate(client_nc)
+        token = response.json["response"]["user"]["authentication_token"]
+
+    verify_token(client_nc, token, status=401)
+
+
+def test_per_user_not_expired_token(app, client_nc):
+    # Test expiry in auth_token using callable
+    def exp(user):
+        assert user.email == "matt@lp.com"
+        return int((datetime.now(timezone.utc) + timedelta(days=1)).timestamp())
+
+    app.config["SECURITY_TOKEN_EXPIRE_TIMESTAMP"] = exp
+
+    response = json_authenticate(client_nc)
+    token = response.json["response"]["user"]["authentication_token"]
+    verify_token(client_nc, token)
+
+
+def test_garbled_auth_token(app, client_nc):
+    # garble token
+    def augment_auth_token(tdata):
+        del tdata["exp"]
+
+    app.config["TESTING_AUGMENT_AUTH_TOKEN"] = augment_auth_token
+    response = json_authenticate(client_nc)
+    token = response.json["response"]["user"]["authentication_token"]
+    verify_token(client_nc, token, status=401)
+
+
+@pytest.mark.csrf(ignore_unauth=True, csrfprotect=True)
+def test_token_auth_csrf(client):
+    response = json_authenticate(client)
+    token = response.json["response"]["user"]["authentication_token"]
+    csrf_token = response.json["response"]["csrf_token"]
+    headers = {"Authentication-Token": token}
+    response = client.post("/token", headers=headers)
+    assert b"The CSRF token is missing" in response.data
+
+    # test JSON version
+    response = client.post("/token", headers=headers, content_type="application/json")
+    assert response.status_code == 400
+    assert response.json["response"]["errors"][0] == "The CSRF token is missing."
+
+    # now do it right
+    headers["X-CSRF-Token"] = csrf_token
+    response = client.post(
+        "/token",
+        headers=headers,
+    )
+    assert b"Token Authentication" in response.data
+
+
+def test_http_auth(client, get_message):
     # browsers expect 401 response with WWW-Authenticate header - which will prompt
     # them to pop up a login form.
     response = client.get("/http", headers={})
     assert response.status_code == 401
-    assert b"You are not authenticated" in response.data
+    assert get_message("UNAUTHENTICATED") in response.data
     assert "WWW-Authenticate" in response.headers
     assert 'Basic realm="Login Required"' == response.headers["WWW-Authenticate"]
 
@@ -589,16 +754,14 @@ def test_http_auth_no_authorization_json(client, get_message):
     assert response.headers["Content-Type"] == "application/json"
 
 
-@pytest.mark.settings(backwards_compat_unauthn=True)
 def test_http_auth_no_authentication(client, get_message):
     response = client.get("/http", headers={})
     assert response.status_code == 401
-    assert b"<h1>Unauthorized</h1>" in response.data
+    assert get_message("UNAUTHENTICATED") in response.data
     assert "WWW-Authenticate" in response.headers
     assert 'Basic realm="Login Required"' == response.headers["WWW-Authenticate"]
 
 
-@pytest.mark.settings(backwards_compat_unauthn=False)
 def test_http_auth_no_authentication_json(client, get_message):
     response = client.get("/http", headers={"accept": "application/json"})
     assert response.status_code == 401
@@ -608,8 +771,7 @@ def test_http_auth_no_authentication_json(client, get_message):
     assert response.headers["Content-Type"] == "application/json"
 
 
-@pytest.mark.settings(backwards_compat_unauthn=True)
-def test_invalid_http_auth_invalid_username(client):
+def test_invalid_http_auth_invalid_username(client, get_message):
     response = client.get(
         "/http",
         headers={
@@ -617,12 +779,11 @@ def test_invalid_http_auth_invalid_username(client):
             % base64.b64encode(b"bogus:bogus").decode("utf-8")
         },
     )
-    assert b"<h1>Unauthorized</h1>" in response.data
+    assert get_message("UNAUTHENTICATED") in response.data
     assert "WWW-Authenticate" in response.headers
     assert 'Basic realm="Login Required"' == response.headers["WWW-Authenticate"]
 
 
-@pytest.mark.settings(backwards_compat_unauthn=False)
 def test_invalid_http_auth_invalid_username_json(client, get_message):
     # Even with JSON - Basic Auth required a WWW-Authenticate header response.
     response = client.get(
@@ -641,8 +802,7 @@ def test_invalid_http_auth_invalid_username_json(client, get_message):
     assert "WWW-Authenticate" in response.headers
 
 
-@pytest.mark.settings(backwards_compat_unauthn=True)
-def test_invalid_http_auth_bad_password(client):
+def test_invalid_http_auth_bad_password(client, get_message):
     response = client.get(
         "/http",
         headers={
@@ -650,13 +810,12 @@ def test_invalid_http_auth_bad_password(client):
             % base64.b64encode(b"joe@lp.com:bogus").decode("utf-8")
         },
     )
-    assert b"<h1>Unauthorized</h1>" in response.data
+    assert get_message("UNAUTHENTICATED") in response.data
     assert "WWW-Authenticate" in response.headers
     assert 'Basic realm="Login Required"' == response.headers["WWW-Authenticate"]
 
 
-@pytest.mark.settings(backwards_compat_unauthn=True)
-def test_custom_http_auth_realm(client):
+def test_custom_http_auth_realm(client, get_message):
     response = client.get(
         "/http_custom_realm",
         headers={
@@ -664,9 +823,37 @@ def test_custom_http_auth_realm(client):
             % base64.b64encode(b"joe@lp.com:bogus").decode("utf-8")
         },
     )
-    assert b"<h1>Unauthorized</h1>" in response.data
+    assert get_message("UNAUTHENTICATED") in response.data
     assert "WWW-Authenticate" in response.headers
     assert 'Basic realm="My Realm"' == response.headers["WWW-Authenticate"]
+
+
+@pytest.mark.csrf(csrfprotect=True)
+def test_http_auth_csrf(client, get_message):
+    headers = {
+        "Authorization": "Basic %s"
+        % base64.b64encode(b"joe@lp.com:password").decode("utf-8")
+    }
+    response = client.post(
+        "/http",
+        headers=headers,
+    )
+    assert b"The CSRF token is missing" in response.data
+
+    # test JSON version
+    response = client.post("/http", headers=headers, content_type="application/json")
+    assert response.status_code == 400
+    assert response.json["response"]["errors"][0] == "The CSRF token is missing."
+
+    # grab a csrf_token
+    response = client.get("/login")
+    csrf_token = get_form_input(response, "csrf_token")
+    headers["X-CSRF-Token"] = csrf_token
+    response = client.post(
+        "/http",
+        headers=headers,
+    )
+    assert b"HTTP Authentication" in response.data
 
 
 def test_multi_auth_basic(client):
@@ -686,8 +873,7 @@ def test_multi_auth_basic(client):
     assert "WWW-Authenticate" in response.headers
 
 
-@pytest.mark.settings(backwards_compat_unauthn=True)
-def test_multi_auth_basic_invalid(client):
+def test_multi_auth_basic_invalid(client, get_message):
     response = client.get(
         "/multi_auth",
         headers={
@@ -695,7 +881,7 @@ def test_multi_auth_basic_invalid(client):
             % base64.b64encode(b"bogus:bogus").decode("utf-8")
         },
     )
-    assert b"<h1>Unauthorized</h1>" in response.data
+    assert get_message("UNAUTHENTICATED") in response.data
     assert "WWW-Authenticate" in response.headers
     assert 'Basic realm="Login Required"' == response.headers["WWW-Authenticate"]
 
@@ -742,35 +928,37 @@ def test_user_deleted_during_session_reverts_to_anonymous_user(app, client):
     assert b"Hello matt@lp.com" not in response.data
 
 
+def test_session_loads_identity(app, client):
+    @app.route("/identity_check")
+    @auth_required("session")
+    def id_check():
+        if hasattr(g, "identity"):
+            identity = g.identity
+            assert hasattr(identity, "loader_called")
+            assert identity.loader_called
+        return "Success"
+
+    json_authenticate(client)
+
+    # add identity loader after authentication to only fire it for
+    # session-authentication next `get` call
+    @identity_loaded.connect_via(app)
+    def identity_loaded_check(sender, identity):
+        identity.loader_called = True
+
+    response = client.get("/identity_check")
+    assert b"Success" == response.data
+
+
 def test_remember_token(client):
     response = authenticate(client, follow_redirects=False)
-    client.cookie_jar.clear_session_cookies()
+    client.delete_cookie("session")
     response = client.get("/profile")
     assert b"profile" in response.data
 
 
 def test_request_loader_does_not_fail_with_invalid_token(client):
-    c = Cookie(
-        version=0,
-        name="remember_token",
-        value="None",
-        port=None,
-        port_specified=False,
-        domain="www.example.com",
-        domain_specified=False,
-        domain_initial_dot=False,
-        path="/",
-        path_specified=True,
-        secure=False,
-        expires=None,
-        discard=True,
-        comment=None,
-        comment_url=None,
-        rest={"HttpOnly": None},
-        rfc2109=False,
-    )
-
-    client.cookie_jar.set_cookie(c)
+    client.set_cookie("remember_token")
     response = client.get("/")
     assert b"BadSignature" not in response.data
 
@@ -852,25 +1040,32 @@ def test_change_uniquifier(app, client_nc):
     verify_token(client_nc, token)
 
 
-def test_verifying_token_from_version_3x(in_app_context):
+def test_verifying_token_from_version_3x(app, client):
     """
     Check token generated with flask security 3.x, which has different form
     than token from version 4.0.0, can be verified
     """
-
-    app = in_app_context
-    populate_data(app)
+    from .test_utils import get_auth_token_version_3x
 
     with app.test_request_context("/"):
         user = app.security.datastore.find_user(email="matt@lp.com")
-
         token = get_auth_token_version_3x(app, user)
 
-        data = app.security.remember_token_serializer.loads(
-            token, max_age=app.security.token_max_age
-        )
+    headers = {"Authentication-Token": token, "Accept": "application/json"}
+    response = client.get("/profile", headers=headers)
+    assert response.status_code == 200
 
-        assert user.verify_auth_token(data) is True
+
+def test_verifying_token_from_version_4x(app, client):
+    from .test_utils import get_auth_token_version_4x
+
+    with app.test_request_context("/"):
+        user = app.security.datastore.find_user(email="matt@lp.com")
+        token = get_auth_token_version_4x(app, user)
+
+    headers = {"Authentication-Token": token, "Accept": "application/json"}
+    response = client.get("/profile", headers=headers)
+    assert response.status_code == 200
 
 
 def test_change_token_uniquifier(app):
@@ -995,20 +1190,20 @@ def test_session_query(in_app_context):
     # This is since the session will load one - but auth_token_required needs to
     # verify that the TOKEN is valid (and it is possible that the user_id in the
     # session is different that the one in the token (huh?)
-    app = in_app_context
-    populate_data(app)
-    client = app.test_client()
+    myapp = in_app_context
+    populate_data(myapp)
+    myclient = myapp.test_client()
 
-    response = json_authenticate(client)
+    response = json_authenticate(myclient)
     token = response.json["response"]["user"]["authentication_token"]
-    current_nqueries = get_num_queries(app.security.datastore)
+    current_nqueries = get_num_queries(myapp.security.datastore)
 
-    response = client.get(
+    response = myclient.get(
         "/token",
         headers={"Content-Type": "application/json", "Authentication-Token": token},
     )
     assert response.status_code == 200
-    end_nqueries = get_num_queries(app.security.datastore)
+    end_nqueries = get_num_queries(myapp.security.datastore)
     assert current_nqueries is None or end_nqueries == (current_nqueries + 2)
 
 
@@ -1035,22 +1230,24 @@ def test_no_get_auth_token(app, client):
     assert "authentication_token" not in response.json["response"]["user"]
 
 
-def test_auth_token_decorator(in_app_context):
+def test_auth_token_decorator(app, client_nc):
     """
     Test accessing endpoint decorated with auth_token_required
     when using token generated by flask security 3.x algorithm
     """
-
-    app = in_app_context
-    populate_data(app)
-    client_nc = app.test_client(use_cookies=False)
-
     with app.test_request_context("/"):
         user = app.security.datastore.find_user(email="matt@lp.com")
         token = get_auth_token_version_3x(app, user)
 
-        response = client_nc.get(
-            "/token",
-            headers={"Content-Type": "application/json", "Authentication-Token": token},
-        )
-        assert response.status_code == 200
+    response = client_nc.get(
+        "/token",
+        headers={"Content-Type": "application/json", "Authentication-Token": token},
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.filterwarnings("ignore:.*BACKWARDS_COMPAT_UNAUTHN:DeprecationWarning")
+@pytest.mark.settings(backwards_compat_unauthn=True)
+def test_unauthn_compat(client):
+    response = client.get("/profile")
+    assert response.status_code == 401

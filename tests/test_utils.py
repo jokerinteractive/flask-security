@@ -1,15 +1,17 @@
 """
-    utils
-    ~~~~~
+    test_utils
+    ~~~~~~~~~~
 
     Test utils
 
-    :copyright: (c) 2019-2022 by J. Christopher Wagner (jwag).
+    :copyright: (c) 2019-2024 by J. Christopher Wagner (jwag).
     :license: MIT, see LICENSE for more details.
 """
+
+from __future__ import annotations
+
 from contextlib import contextmanager
 import re
-import typing as t
 
 from flask.json.tag import TaggedJSONSerializer
 from flask.signals import message_flashed
@@ -35,18 +37,49 @@ _missing = object
 
 
 def authenticate(
-    client, email="matt@lp.com", password="password", endpoint=None, **kwargs
+    client,
+    email="matt@lp.com",
+    password="password",
+    endpoint=None,
+    csrf=False,
+    **kwargs,
 ):
     data = dict(email=email, password=password, remember="y")
+    if csrf:
+        response = client.get(endpoint or "/login")
+        data["csrf_token"] = get_form_input(response, "csrf_token")
     return client.post(endpoint or "/login", data=data, **kwargs)
 
 
 def json_authenticate(client, email="matt@lp.com", password="password", endpoint=None):
-    data = f'{{"email": "{email}", "password": "{password}"}}'
+    data = dict(email=email, password=password)
 
     # Get auth token always
     ep = endpoint or "/login?include_auth_token"
-    return client.post(ep, content_type="application/json", data=data)
+    return client.post(ep, content_type="application/json", json=data)
+
+
+def is_authenticated(client, get_message, auth_token=None):
+    # Return True is 'client' is authenticated.
+    # Return False if not
+    # Raise ValueError not certain...
+    headers = {"accept": "application/json"}
+    if auth_token:
+        headers["Authentication-Token"] = auth_token
+    response = client.get("/profile", headers=headers)
+    if response.status_code == 200:
+        return True
+    if response.status_code == 401 and response.json["response"]["errors"][0].encode(
+        "utf-8"
+    ) == get_message("UNAUTHENTICATED"):
+        return False
+    raise ValueError("Failed to figure out if authenticated")
+
+
+def check_location(app, location, expected_base):
+    # verify response location. Historically this can be absolute or relative based
+    # on configuration. As of 5.4 and Werkzeug 2.1 it is always relative
+    return location == expected_base
 
 
 def verify_token(client_nc, token, status=None):
@@ -122,9 +155,7 @@ def setup_tf_sms(client, url_prefix=None):
 
 
 def get_existing_session(client):
-    cookie = next(
-        (cookie for cookie in client.cookie_jar if cookie.name == "session"), None
-    )
+    cookie = client.get_cookie("session")
     if cookie:
         serializer = URLSafeTimedSerializer("secret", serializer=TaggedJSONSerializer())
         val = serializer.loads_unsafe(cookie.value)
@@ -151,6 +182,19 @@ def get_form_action(response, ordinal=0):
         re.IGNORECASE | re.DOTALL,
     )
     return matcher[ordinal]
+
+
+def get_form_input(response, field_id):
+    # return value of field with the id == field_id or None if not found
+    rex = f'<input [^>]*id="{field_id}"[^>]*value="([^"]*)">'
+    matcher = re.findall(
+        rex,
+        response.data.decode("utf-8"),
+        re.IGNORECASE | re.DOTALL,
+    )
+    if matcher:
+        return matcher[0]
+    return None
 
 
 def check_xlation(app, locale):
@@ -239,12 +283,7 @@ def get_num_queries(datastore):
     return None if datastore doesn't support this.
     """
     if is_sqlalchemy(datastore):
-        try:
-            # Flask-SQLAlachemy >= 3.0.0
-            from flask_sqlalchemy.record_queries import get_recorded_queries
-        except ImportError:
-            # Flask-SQLAlchemy < 3.0.0
-            from flask_sqlalchemy import get_debug_queries as get_recorded_queries
+        from flask_sqlalchemy.record_queries import get_recorded_queries
 
         return len(get_recorded_queries())
     return None
@@ -257,7 +296,7 @@ def is_sqlalchemy(datastore):
 
 
 class SmsTestSender(SmsSenderBaseClass):
-    messages: t.List[str] = []
+    messages: list[str] = []
     count = 0
 
     # This looks strange because we need class variables since test need to access a
@@ -380,6 +419,12 @@ def get_auth_token_version_3x(app, user):
     return app.security.remember_token_serializer.dumps(data)
 
 
+def get_auth_token_version_4x(app, user):
+    """Copy of algorithm that generated user token in version 4.x- 5.4"""
+    data = [str(user.fs_uniquifier)]
+    return app.security.remember_token_serializer.dumps(data)
+
+
 class FakeSerializer:
     def __init__(self, age=None, invalid=False):
         self.age = age
@@ -397,3 +442,12 @@ class FakeSerializer:
 
     def dumps(self, state):
         return "heres your state"
+
+
+def convert_bool_option(v):
+    # Used for command line options to convert string to bool
+    if str(v).lower() in ["true"]:
+        return True
+    elif str(v).lower() in ["false"]:
+        return False
+    return v

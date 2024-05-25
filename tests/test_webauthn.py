@@ -4,7 +4,7 @@
 
     WebAuthn tests
 
-    :copyright: (c) 2021-2022 by J. Christopher Wagner (jwag).
+    :copyright: (c) 2021-2024 by J. Christopher Wagner (jwag).
     :license: MIT, see LICENSE for more details.
 
 """
@@ -12,10 +12,8 @@
 from base64 import urlsafe_b64encode
 import copy
 import datetime
-from dateutil import parser
 import json
 import re
-import typing as t
 
 import pytest
 
@@ -24,12 +22,16 @@ from tests.test_utils import (
     FakeSerializer,
     authenticate,
     capture_flashes,
+    check_location,
     get_existing_session,
     get_form_action,
+    get_form_input,
+    is_authenticated,
     json_authenticate,
     logout,
     reset_fresh,
     setup_tf_sms,
+    verify_token,
 )
 
 from flask_security import (
@@ -60,9 +62,9 @@ REG_DATA1 = {
         "FEybDVYMnN5UTNGUmVXUlRVVjlyVUVWcVZqVmhNbVF3UVhCbVlYUmpjRk"
         "V4WVZoRWJWRlFidyIsIm9yaWdpbiI6Imh0dHA6Ly9sb2NhbGhvc3Q6NT"
         "AwMSIsImNyb3NzT3JpZ2luIjpmYWxzZX0",
+        "transports": ["usb"],
     },
     "extensions": '{"credProps": {}}',
-    "transports": ["usb"],
 }
 SIGNIN_DATA1 = {
     "id": "wUUqNOjY35dcT-vpikZpZx-T91NjIe4PqrV8j7jYPOc",
@@ -94,9 +96,9 @@ REG_DATA2 = {
         "YzIxRFEybDVYMnN5UTNGUmVXUlRVVjlyVUVWcVZqVmhNbVF3UV"
         "hCbVlYUmpjRkV4WVZoRWJWRlFidyIsIm9yaWdpbiI6Imh0dHA6L"
         "y9sb2NhbGhvc3Q6NTAwMSIsImNyb3NzT3JpZ2luIjpmYWxzZX0",
+        "transports": ["nfc", "usb"],
     },
     "extensions": '{"credProps": {"rk": True}}',
-    "transports": ["nfc", "usb"],
 }
 
 # This has user_verification=True - i.e. a multi-factor capable key
@@ -115,9 +117,9 @@ REG_DATA_UV = {
         "xRFEybDVYMnN5UTNGUmVXUlRVVjlyVUVWcVZqVmhNbVF3UVhCbVlY"
         "UmpjRkV4WVZoRWJWRlFidyIsIm9yaWdpbiI6Imh0dHA6Ly9sb2Nhb"
         "Ghvc3Q6NTAwMSIsImNyb3NzT3JpZ2luIjpmYWxzZX0",
+        "transports": ["nfc", "usb"],
     },
     "extensions": '{"credProps":{"rk":true}}',
-    "transports": ["nfc", "usb"],
 }
 
 SIGNIN_DATA_UV = {
@@ -154,9 +156,9 @@ REG_DATA_UH = {
         "yVUVWcVZqVmhNbVF3UVhCbVlYUmpjRkV4WVZoRWJWRlFidyIsIm9yaWdpbi"
         "I6Imh0dHA6Ly9sb2NhbGhvc3"
         "Q6NTAwMSIsImNyb3NzT3JpZ2luIjpmYWxzZX0",
+        "transports": ["nfc", "usb"],
     },
     "extensions": '{"credProps":{"rk": true}}"',
-    "transports": ["nfc", "usb"],
 }
 SIGNIN_DATA_UH = {
     "id": "rHb1OXVM--dgGcWg0u3cfomyc-Tu4l4kK8GjVkS8bms-foXmBAlWHyTzuhgGgCnx",
@@ -177,7 +179,7 @@ SIGNIN_DATA_UH = {
 
 
 class HackWebauthnUtil(WebauthnUtil):
-    def generate_challenge(self, nbytes: t.Optional[int] = None) -> str:
+    def generate_challenge(self, nbytes=None):
         return CHALLENGE
 
     def origin(self):
@@ -185,8 +187,12 @@ class HackWebauthnUtil(WebauthnUtil):
         return "http://localhost:5001"
 
 
-def _register_start(client, name="testr1", usage="secondary", endpoint="wan-register"):
-    response = client.post(endpoint, data=dict(name=name, usage=usage))
+def _register_start(
+    client, name="testr1", usage="secondary", endpoint="wan-register", csrf_token=None
+):
+    response = client.post(
+        endpoint, data=dict(name=name, usage=usage, csrf_token=csrf_token)
+    )
     matcher = re.match(
         r".*handleRegister\(\'(.*)\'\).*",
         response.data.decode("utf-8"),
@@ -230,8 +236,11 @@ def _signin_start(
     client,
     identity=None,
     endpoint="wan-signin",
+    csrf_token=None,
 ):
-    response = client.post(endpoint, data=dict(identity=identity))
+    response = client.post(
+        endpoint, data=dict(identity=identity, csrf_token=csrf_token)
+    )
     matcher = re.match(
         r".*handleSignin\(\'(.*)\'\).*",
         response.data.decode("utf-8"),
@@ -294,6 +303,10 @@ def test_basic(app, clients, get_message):
     authenticate(clients)
 
     response = clients.get("/wan-register")
+    # default config allows for both primary and secondary usage
+    # so form should have selector
+    assert get_form_input(response, "usage-0")
+    assert get_form_input(response, "usage-1")
 
     # post with no name
     response = clients.post("/wan-register", data=dict())
@@ -374,13 +387,15 @@ def test_basic_json(app, clients, get_message):
             cred.lastuse_datetime = fake_dt
             app.security.datastore.put(cred)
         app.security.datastore.commit()
-        if hasattr(app.security.datastore.db, "close_db"):
+        if hasattr(app.security.datastore.db, "close_db") and callable(
+            app.security.datastore.db.close_db
+        ):
             app.security.datastore.db.close_db(None)
 
     response = clients.get("/wan-register", headers=headers)
     active_creds = response.json["response"]["registered_credentials"]
     assert active_creds[0]["name"] == "testr1"
-    assert parser.parse(active_creds[0]["lastuse"]) == fake_dt
+    assert datetime.datetime.fromisoformat(active_creds[0]["lastuse"]) == fake_dt
 
     # sign in - simple case use identity so we get back allowCredentials
     logout(clients)
@@ -392,7 +407,7 @@ def test_basic_json(app, clients, get_message):
     assert "user" not in rjson["response"]
 
     response = clients.post(
-        response_url,
+        f"{response_url}?include_auth_token",
         json=dict(credential=json.dumps(SIGNIN_DATA1)),
     )
     assert response.status_code == 200
@@ -400,13 +415,13 @@ def test_basic_json(app, clients, get_message):
     assert auths[1][1] == ["webauthn"]
 
     # verify actually logged in
-    response = clients.get("/profile", follow_redirects=False)
-    assert response.status_code == 200
+    assert is_authenticated(clients, get_message)
+    verify_token(clients, response.json["response"]["user"]["authentication_token"])
 
     # fetch credentials and verify lastuse was updated
     response = clients.get("/wan-register", headers=headers)
     active_creds = response.json["response"]["registered_credentials"]
-    assert parser.parse(active_creds[0]["lastuse"]) != fake_dt
+    assert datetime.datetime.fromisoformat(active_creds[0]["lastuse"]) != fake_dt
     assert active_creds[0]["transports"] == ["usb"]
     assert active_creds[0]["usage"] == "first"
 
@@ -506,7 +521,7 @@ def test_bad_data_register(app, client, get_message):
     register_options, response_url = _register_start_json(client, name="testr3")
 
     # first try mangling json - should get API_ERROR
-    response = client.post(response_url, json=dict(credential="hi there"))
+    response = client.post(response_url, json=dict(credential='"hi there"'))
     assert response.status_code == 400
     assert response.json["response"]["errors"][0].encode("utf-8") == get_message(
         "API_ERROR"
@@ -554,7 +569,7 @@ def test_bad_data_signin(app, client, get_message):
 
     logout(client)
     signin_options, response_url, _ = _signin_start_json(client, "matt@lp.com")
-    response = client.post(response_url, json=dict(credential="hi there"))
+    response = client.post(response_url, json=dict(credential='"hi there"'))
     assert response.status_code == 400
     assert response.json["response"]["errors"][0].encode("utf-8") == get_message(
         "API_ERROR"
@@ -839,7 +854,7 @@ def test_tf_json(app, client, get_message):
 def test_tf_validity_window(app, client, get_message):
     # Test with a two-factor validity setting - we don't get re-prompted.
     authenticate(client)
-    assert "tf_validity" not in [c.name for c in client.cookie_jar]
+    assert not client.get_cookie("tf_validity")
     register_options, response_url = _register_start_json(client)
     client.post(response_url, json=dict(credential=json.dumps(REG_DATA1)))
     logout(client)
@@ -875,7 +890,7 @@ def test_tf_validity_window(app, client, get_message):
     signin_options, response_url = _signin_start(client, "matt@lp.com")
     response = client.post(response_url, json=dict(credential=json.dumps(SIGNIN_DATA1)))
     assert response.status_code == 200
-    assert "tf_validity" in [c.name for c in client.cookie_jar]
+    assert client.get_cookie("tf_validity")
     logout(client)
 
     # since we did specify 'remember' previously - should not require 2FA
@@ -898,7 +913,8 @@ def test_tf_validity_window(app, client, get_message):
 )
 def test_tf_validity_window_json(app, client, get_message):
     # Test with a two-factor validity setting - we don't get re-prompted.
-    response = json_authenticate(client)
+    # This also relies on the tf_validity_cookie
+    json_authenticate(client)
     register_options, response_url = _register_start_json(client)
     client.post(response_url, json=dict(credential=json.dumps(REG_DATA1)))
     logout(client)
@@ -912,11 +928,7 @@ def test_tf_validity_window_json(app, client, get_message):
     signin_options, response_url = _signin_start(client, "matt@lp.com")
     response = client.post(response_url, json=dict(credential=json.dumps(SIGNIN_DATA1)))
     assert response.status_code == 200
-    tf_token = response.json["response"]["tf_validity_token"]
     logout(client)
-
-    # make sure the cookie doesn't affect the JSON request
-    client.cookie_jar.clear("localhost.local", "/", "tf_validity")
 
     # Sign in again - shouldn't require 2FA
     response = client.post(
@@ -925,7 +937,6 @@ def test_tf_validity_window_json(app, client, get_message):
             email="matt@lp.com",
             password="password",
             remember=True,
-            tf_validity_token=tf_token,
         ),
     )
     assert response.status_code == 200
@@ -1179,20 +1190,20 @@ def test_reset(app, client):
 
 
 @pytest.mark.settings(webauthn_util_cls=HackWebauthnUtil)
-def test_user_handle(app, client, get_message):
+def test_user_handle(app, clients, get_message):
     """Test that we fail signin if user_handle doesn't match.
     Since we generated the SIGNIN_DATA_OH from view_scaffold - the user_handle
     has no way of matching.
     """
-    authenticate(client)
-    register_options, response_url = _register_start_json(client, usage="first")
-    response = client.post(response_url, json=dict(credential=json.dumps(REG_DATA_UH)))
+    authenticate(clients)
+    register_options, response_url = _register_start_json(clients, usage="first")
+    response = clients.post(response_url, json=dict(credential=json.dumps(REG_DATA_UH)))
     assert response.status_code == 200
 
     # verify can't sign in
-    logout(client)
-    signin_options, response_url, _ = _signin_start_json(client, "matt@lp.com")
-    response = client.post(
+    logout(clients)
+    signin_options, response_url, _ = _signin_start_json(clients, "matt@lp.com")
+    response = clients.post(
         response_url, json=dict(credential=json.dumps(SIGNIN_DATA_UH))
     )
     assert response.json["response"]["field_errors"]["credential"][0].encode(
@@ -1204,21 +1215,18 @@ def test_user_handle(app, client, get_message):
         user = app.security.datastore.find_user(email="matt@lp.com")
         app.security.datastore.set_webauthn_user_handle(user)
         app.security.datastore.commit()
-
-        b64_user_handle = (
-            urlsafe_b64encode(user.fs_webauthn_user_handle.encode())
-            .decode("utf-8")
-            .replace("=", "")
-        )
-        upd_signin_data = copy.deepcopy(SIGNIN_DATA_UH)
-        upd_signin_data["response"]["userHandle"] = b64_user_handle
-        signin_options, response_url, _ = _signin_start_json(client, "matt@lp.com")
-        response = client.post(
-            response_url, json=dict(credential=json.dumps(upd_signin_data))
-        )
-        # verify actually logged in
-        response = client.get("/profile", headers={"accept": "application/json"})
-        assert response.status_code == 200
+        b64_user_handle = urlsafe_b64encode(
+            user.fs_webauthn_user_handle.encode()
+        ).decode("utf-8")
+    upd_signin_data = copy.deepcopy(SIGNIN_DATA_UH)
+    upd_signin_data["response"]["userHandle"] = b64_user_handle
+    signin_options, response_url, _ = _signin_start_json(clients, "matt@lp.com")
+    response = clients.post(
+        response_url, json=dict(credential=json.dumps(upd_signin_data))
+    )
+    # verify actually logged in
+    response = clients.get("/profile", headers={"accept": "application/json"})
+    assert response.status_code == 200
 
 
 @pytest.mark.settings(webauthn_util_cls=HackWebauthnUtil)
@@ -1270,9 +1278,12 @@ def test_verify_json(app, client, get_message):
     signin_options = response.json["response"]["credential_options"]
     assert signin_options["userVerification"] == "discouraged"
 
-    response_url = f'wan-verify/{response.json["response"]["wan_state"]}'
+    response_url = (
+        f'wan-verify/{response.json["response"]["wan_state"]}?include_auth_token'
+    )
     response = client.post(response_url, json=dict(credential=json.dumps(SIGNIN_DATA1)))
     assert response.status_code == 200
+    verify_token(client, response.json["response"]["user"]["authentication_token"])
 
     response = client.get("fresh", headers=headers)
     assert response.status_code == 200
@@ -1293,7 +1304,7 @@ def test_verify(app, client, get_message):
 
     old_paa = reset_fresh(client, app.config["SECURITY_FRESHNESS"])
     response = client.get("fresh")
-    assert "/verify?next=http%3A%2F%2Flocalhost%2Ffresh" in response.location
+    assert response.location == "/verify?next=/fresh"
     signin_options, response_url = _signin_start(
         client, endpoint="wan-verify?next=/fresh"
     )
@@ -1463,7 +1474,7 @@ def test_remember_token(client):
     assert response.status_code == 200
     logout(client)
 
-    assert "remember_token" not in [c.name for c in client.cookie_jar]
+    assert not client.get_cookie("remember_token")
 
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
 
@@ -1477,8 +1488,8 @@ def test_remember_token(client):
         response_url,
         json=dict(credential=json.dumps(SIGNIN_DATA1), remember=True),
     )
-    assert "remember_token" in [c.name for c in client.cookie_jar]
-    client.cookie_jar.clear_session_cookies()
+    assert client.get_cookie("remember_token")
+    client.delete_cookie("session")
     response = client.get("/profile")
     assert b"profile" in response.data
 
@@ -1494,7 +1505,7 @@ def test_remember_token_tf(client):
     assert response.status_code == 200
     logout(client)
 
-    assert "remember_token" not in [c.name for c in client.cookie_jar]
+    assert not client.get_cookie("remember_token")
 
     # login again - should require MFA
     response = client.post(
@@ -1512,8 +1523,8 @@ def test_remember_token_tf(client):
         response_url,
         json=dict(credential=json.dumps(SIGNIN_DATA1), remember=True),
     )
-    assert "remember_token" in [c.name for c in client.cookie_jar]
-    client.cookie_jar.clear_session_cookies()
+    assert client.get_cookie("remember_token")
+    client.delete_cookie("session")
     response = client.get("/profile")
     assert b"profile" in response.data
 
@@ -1642,7 +1653,7 @@ def test_login_next(app, client, get_message):
     logout(client, endpoint="/auth/logout")
 
     response = client.get("profile", follow_redirects=True)
-    assert "?next=%2Fprofile" in response.request.url
+    assert "?next=/profile" in response.request.url
     # pull webauthn form action out of login_form - should have ?next=...
     webauthn_url = get_form_action(response, 1)
 
@@ -1656,3 +1667,112 @@ def test_login_next(app, client, get_message):
     )
     assert response.status_code == 200
     assert b"Profile Page" in response.data
+
+    # Try form.next
+    logout(client, endpoint="/auth/logout")
+    reset_signcount(app, "matt@lp.com", "testr3")
+
+    response = client.post(
+        "/auth/wan-signin", data=dict(identity="matt@lp.com", next="/im-in")
+    )
+    response_url = get_form_action(response)
+
+    next_loc = get_form_input(response, "next")
+    response = client.post(
+        response_url,
+        data=dict(credential=json.dumps(SIGNIN_DATA1), next=next_loc),
+        follow_redirects=False,
+    )
+    assert "/im-in" in response.location
+
+
+@pytest.mark.flask_async()
+@pytest.mark.settings(webauthn_util_cls=HackWebauthnUtil)
+def test_async(app, client, get_message):
+    auths = []
+
+    @user_authenticated.connect_via(app)
+    async def authned(myapp, user, **extra_args):
+        auths.append((user.email, extra_args["authn_via"]))
+
+    @wan_registered.connect_via(app)
+    async def pc(sender, user, name, **extra_args):
+        assert name == "testr1"
+        assert len(user.webauthn) == 1
+
+    @wan_deleted.connect_via(app)
+    async def wan_delete(sender, user, name, **extra_args):
+        assert name == "testr1"
+
+    authenticate(client)
+
+    register_options, response_url = _register_start(client, usage="first")
+    response = client.post(
+        response_url, data=dict(credential=json.dumps(REG_DATA1)), follow_redirects=True
+    )
+    assert response.status_code == 200
+
+    # sign in - simple case use identity so we get back allowCredentials
+    logout(client)
+    signin_options, response_url = _signin_start(client, "matt@lp.com")
+    response = client.post(
+        response_url,
+        data=dict(credential=json.dumps(SIGNIN_DATA1)),
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert b"Welcome matt@lp.com" in response.data
+    assert len(auths) == 2
+    assert auths[1][1] == ["webauthn"]
+
+    # test delete signal
+    response = client.post(
+        "/wan-delete", data=dict(name="testr1"), follow_redirects=True
+    )
+
+
+@pytest.mark.csrf()
+@pytest.mark.settings(
+    webauthn_util_cls=HackWebauthnUtil,
+    wan_post_register_view="/done-registration",
+    post_login_view="/post-login",
+)
+def test_csrf(app, client, get_message):
+    response = client.get("/login")
+    csrf_token = get_form_input(response, "csrf_token")
+    authenticate(client, csrf=True)
+
+    register_options, response_url = _register_start(
+        client, usage="first", csrf_token=csrf_token
+    )
+    data = dict(credential=json.dumps(REG_DATA1))
+    response = client.post(response_url, data=data, follow_redirects=True)
+    assert (
+        b"The CSRF token is missing" in response.data
+    )  # this should have been flashed
+
+    data["csrf_token"] = csrf_token
+    response = client.post(response_url, data=data)
+    assert check_location(app, response.location, "/done-registration")
+    logout(client)
+
+    # use old csrf_token - should fail and we should get the error in the template
+    response = client.post(
+        "wan-signin", data=dict(identity="matt@lp.com", csrf_token=csrf_token)
+    )
+    assert b"The CSRF tokens do not match." in response.data
+
+    response = client.get("/wan-signin")
+    csrf_token = get_form_input(response, "csrf_token")
+    signin_options, response_url = _signin_start(
+        client, "matt@lp.com", csrf_token=csrf_token
+    )
+    data = dict(credential=json.dumps(SIGNIN_DATA1))
+    response = client.post(response_url, data=data, follow_redirects=True)
+    assert (
+        b"The CSRF token is missing" in response.data
+    )  # this should have been flashed
+
+    data["csrf_token"] = csrf_token
+    response = client.post(response_url, data=data)
+    assert check_location(app, response.location, "/post-login")

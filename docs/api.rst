@@ -15,18 +15,12 @@ Core
 
    A proxy for the current user.
 
-.. function:: flask_security.Security.unauthorized_handler
-
-    If an endpoint fails authentication or authorization from one of the decorators
-    described below
-    (except ``login_required``), a method annotated with this decorator will be called.
-    For ``login_required`` (which is implemented in Flask-Login) use
-    **flask_security.login_manager.unauthorized_handler**
-
-    .. deprecated:: 3.3.0
-
 Protecting Views
 ----------------
+All Flask-Security decorators are compatible with Flask's async implementation.
+This is accomplished by wrapping function calls with flask.ensure_async().
+Please see `Flask async`_.
+
 .. autofunction:: flask_security.anonymous_user_required
 
 .. autofunction:: flask_security.http_auth_required
@@ -34,8 +28,6 @@ Protecting Views
 .. autofunction:: flask_security.auth_token_required
 
 .. autofunction:: flask_security.auth_required
-
-.. autofunction:: flask_security.login_required
 
 .. autofunction:: flask_security.roles_required
 
@@ -60,14 +52,15 @@ User Object Helpers
 .. autoclass:: flask_security.WebAuthnMixin
    :members:
 
-.. autoclass:: flask_security.AnonymousUser
-   :members:
-
 
 Datastores
 ----------
 .. autoclass:: flask_security.UserDatastore
     :members:
+    :exclude-members: create_webauthn, find_user_from_webauthn,
+        mf_set_recovery_codes, mf_delete_recovery_code,
+        set_webauthn_user_handle,
+        us_get_totp_secrets, us_put_totp_secrets
 
 .. autoclass:: flask_security.SQLAlchemyUserDatastore
     :show-inheritance:
@@ -115,6 +108,11 @@ Datastores
     The WebAuthn model. This must be provided by the application.
     See :ref:`Models <models_topic>`.
 
+Packaged Models
+---------------
+.. autoclass:: flask_security.models.fsqla.FsModels
+   :members:
+
 Utils
 -----
 .. autofunction:: flask_security.lookup_identity
@@ -147,8 +145,6 @@ Utils
 
 .. autofunction:: flask_security.send_mail
 
-.. autofunction:: flask_security.get_token_status
-
 .. autofunction:: flask_security.check_and_get_token_status
 
 .. autofunction:: flask_security.get_url
@@ -161,13 +157,13 @@ Utils
 
 .. autofunction:: flask_security.pwned
 
-.. autofunction:: flask_security.transform_url
-
 .. autofunction:: flask_security.unique_identity_attribute
 
 .. autofunction:: flask_security.us_send_security_token
 
 .. autofunction:: flask_security.tf_send_security_token
+
+.. autoclass:: flask_security.AsaList
 
 .. autoclass:: flask_security.SmsSenderBaseClass
   :members: send_sms
@@ -175,7 +171,17 @@ Utils
 .. autoclass:: flask_security.SmsSenderFactory
   :members: createSender
 
+.. py:class:: OauthCbType[oauth: OAuth, token: t.Any]
+
+    This callback is called when the oauth
+    redirect happens. It must take the response from the provider and return
+    a tuple of <user_model_field_name, value> - which will be used
+    to look up the user in the datastore.
+
 .. autoclass:: flask_security.OAuthGlue
+  :members: register_provider, register_provider_ext
+
+.. autoclass:: flask_security.FsOAuthProvider
   :members:
 
 
@@ -191,6 +197,8 @@ Security() instantiation.
 .. autoclass:: flask_security.MailUtil
   :members:
   :special-members: __init__
+
+.. autoclass:: flask_security.EmailValidateException
 
 .. autoclass:: flask_security.PasswordUtil
   :members:
@@ -215,6 +223,7 @@ Security() instantiation.
 Forms
 -----
 
+.. autoclass:: flask_security.ChangeEmailForm
 .. autoclass:: flask_security.ChangePasswordForm
 .. autoclass:: flask_security.ConfirmRegisterForm
 .. autoclass:: flask_security.ForgotPasswordForm
@@ -249,6 +258,8 @@ Signals
 -------
 See the `Flask documentation on signals`_ for information on how to use these
 signals in your code.
+All Flask-Security signals are compatible with Blinker's async implementation.
+See `Blinker async`_
 
 .. tip::
 
@@ -268,6 +279,13 @@ sends the following signals.
     ``register``.
 
     .. versionadded:: 3.4.0
+
+.. data:: user_unauthenticated
+
+   Sent when a user fails to authenticate. It is sent from the `default_unauthn_handler`.
+   It is passed the app (which is the sender).
+
+    .. versionadded:: 5.4.0
 
 .. data:: user_registered
 
@@ -318,6 +336,20 @@ sends the following signals.
 
    Sent when a user requests a password reset. In addition to the app (which is
    the sender), it is passed `user`, `token` (deprecated), and `reset_token` arguments.
+
+.. data:: change_email_instructions_sent
+
+    Sent when a user requests to change their registered email address. In addition to the
+    app (which is the sender) it is passed `user`, `token`, and `new_email`.
+
+    .. versionadded:: 5.5.0
+
+.. data:: change_email_confirmed
+
+    Sent when a user has confirmed their new email address. In addition to the
+    app (which is the sender) it is passed `user`, `old_email`.
+
+    .. versionadded:: 5.5.0
 
 .. data:: tf_code_confirmed
 
@@ -382,4 +414,6 @@ sends the following signals.
 
     .. versionadded:: 5.0.0
 
-.. _Flask documentation on signals: https://flask.palletsprojects.com/en/2.0.x/signals/
+.. _Flask async: https://flask.palletsprojects.com/en/3.0.x/async-await/#using-async-and-await
+.. _Flask documentation on signals: https://flask.palletsprojects.com/en/2.3.x/signals/
+.. _Blinker async: https://blinker.readthedocs.io/en/stable/#async-receivers

@@ -4,7 +4,7 @@
 
     Changeable tests
 
-    :copyright: (c) 2019-2022 by J. Christopher Wagner (jwag).
+    :copyright: (c) 2019-2023 by J. Christopher Wagner (jwag).
     :license: MIT, see LICENSE for more details.
 """
 
@@ -21,7 +21,9 @@ from flask_security.signals import password_changed, user_authenticated
 from flask_security.utils import localize_callback
 from tests.test_utils import (
     authenticate,
+    check_location,
     check_xlation,
+    get_form_input,
     get_session,
     hash_password,
     init_app_with_options,
@@ -203,7 +205,7 @@ def test_change_invalidates_session(app, client):
     # try to access protected endpoint - shouldn't work
     response = client.get("/profile")
     assert response.status_code == 302
-    assert "/login?next=%2Fprofile" in response.location
+    assert response.location == "/login?next=/profile"
 
 
 def test_change_updates_remember(app, client):
@@ -224,8 +226,8 @@ def test_change_updates_remember(app, client):
     response = client.get("/profile", follow_redirects=True)
     assert b"Profile Page" in response.data
 
-    assert "remember_token" in [c.name for c in client.cookie_jar]
-    client.cookie_jar.clear_session_cookies()
+    assert client.get_cookie("remember_token")
+    client.delete_cookie("session")
     response = client.get("/profile", follow_redirects=True)
     assert b"Profile Page" in response.data
 
@@ -253,7 +255,7 @@ def test_change_invalidates_auth_token(app, client):
     # authtoken should now be invalid
     response = client.get("/token", headers=headers)
     assert response.status_code == 302
-    assert "/login?next=%2Ftoken" in response.location
+    assert response.location == "/login?next=/token"
 
 
 def test_auth_uniquifier(app):
@@ -432,7 +434,7 @@ def test_basic_change(app, client_nc, get_message):
         new_password_confirm="new strong password",
     )
     response = client_nc.post("/change", data=data)
-    assert b"You are not authenticated" in response.data
+    assert get_message("UNAUTHENTICATED") in response.data
     assert "WWW-Authenticate" in response.headers
 
     response = client_nc.post(
@@ -665,4 +667,50 @@ def test_pwd_no_normalize(app, client):
         json=data,
         headers={"Content-Type": "application/json"},
     )
+    assert response.status_code == 200
+
+
+@pytest.mark.csrf(ignore_unauth=True)
+@pytest.mark.settings(post_change_view="/post_change_view")
+def test_csrf(app, client):
+    # enable CSRF, make sure template shows CSRF errors.
+    authenticate(client)
+    data = {
+        "password": "password",
+        "new_password": "new strong password",
+        "new_password_confirm": "new strong password",
+    }
+    response = client.post("/change", data=data)
+    assert b"The CSRF token is missing" in response.data
+    # Note that we get a CSRF token EVEN for errors - this seems odd
+    # but can't find anything that says its a security issue
+    csrf_token = get_form_input(response, "csrf_token")
+
+    data["csrf_token"] = csrf_token
+    response = client.post("/change", data=data)
+    assert check_location(app, response.location, "/post_change_view")
+
+
+@pytest.mark.csrf(ignore_unauth=True, csrfprotect=True)
+def test_csrf_json(app, client):
+    # This tests the handle_csrf code path - especially the JSON code path
+    # that should return a JSON response!
+    authenticate(client)
+    data = {
+        "password": "password",
+        "new_password": "new strong password",
+        "new_password_confirm": "new strong password",
+    }
+    response = client.post("/change", json=data)
+    assert response.status_code == 400
+    assert response.json["response"]["errors"][0] == "The CSRF token is missing."
+
+    # check form path also
+    response = client.post("/change", data=data)
+    assert response.status_code == 400
+    assert b"The CSRF token is missing." in response.data
+
+    response = client.get("/change", content_type="application/json")
+    csrf_token = response.json["response"]["csrf_token"]
+    response = client.post("/change", json=data, headers={"X-CSRF-Token": csrf_token})
     assert response.status_code == 200

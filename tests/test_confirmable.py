@@ -5,22 +5,28 @@
     Confirmable tests
 """
 
+from datetime import date, timedelta
 import re
-import time
 from urllib.parse import parse_qsl, urlsplit
 
 import pytest
 from flask import Flask
+from freezegun import freeze_time
+from wtforms.fields import StringField
+from wtforms.validators import Length
 
-from flask_security.core import UserMixin
-from flask_security.confirmable import generate_confirmation_token
+from flask_security.core import Security, UserMixin
 from flask_security.signals import confirm_instructions_sent, user_confirmed
+from flask_security.forms import SendConfirmationForm
 
 from tests.test_utils import (
     authenticate,
     capture_flashes,
     capture_registrations,
+    check_location,
+    is_authenticated,
     logout,
+    populate_data,
 )
 
 pytestmark = pytest.mark.confirmable()
@@ -83,28 +89,19 @@ def test_confirmable_flag(app, clients, get_message):
 
     # Test confirm
     token = registrations[0]["confirm_token"]
-    response = clients.get("/confirm/" + token, follow_redirects=True)
-    assert get_message("EMAIL_CONFIRMED") in response.data
+    response = clients.get("/confirm/" + token, follow_redirects=False)
     assert len(recorded_confirms) == 1
+    response = clients.get(response.location)
+    assert get_message("EMAIL_CONFIRMED") in response.data
+    # make sure not logged in
+    assert not is_authenticated(clients, get_message)
 
     # Test already confirmed
     response = clients.get("/confirm/" + token, follow_redirects=True)
     assert get_message("ALREADY_CONFIRMED") in response.data
     assert len(recorded_instructions_sent) == 2
 
-    # Test already confirmed and expired token
-    app.config["SECURITY_CONFIRM_EMAIL_WITHIN"] = "-1 days"
-    with app.test_request_context("/"):
-        email = registrations[0]["email"]
-        user = app.security.datastore.find_user(email=email)
-        expired_token = generate_confirmation_token(user)
-    response = clients.get("/confirm/" + expired_token, follow_redirects=True)
-    assert get_message("ALREADY_CONFIRMED") in response.data
-    assert len(recorded_instructions_sent) == 2
-
     # Test already confirmed when asking for confirmation instructions
-    logout(clients)
-
     response = clients.get("/confirm")
     assert response.status_code == 200
 
@@ -122,7 +119,9 @@ def test_confirmable_flag(app, clients, get_message):
     with app.app_context():
         app.security.datastore.delete(user)
         app.security.datastore.commit()
-        if hasattr(app.security.datastore.db, "close_db"):
+        if hasattr(app.security.datastore.db, "close_db") and callable(
+            app.security.datastore.db.close_db
+        ):
             app.security.datastore.db.close_db(None)
 
     response = clients.get("/confirm/" + token, follow_redirects=True)
@@ -187,14 +186,14 @@ def test_requires_confirmation_error_redirect(app, clients):
 @pytest.mark.registerable()
 @pytest.mark.settings(confirm_email_within="1 milliseconds")
 def test_expired_confirmation_token(client, get_message):
-    with capture_registrations() as registrations:
-        data = dict(email="mary@lp.com", password="awesome sunset", next="")
-        client.post("/register", data=data, follow_redirects=True)
+    # Note that we need relatively new-ish date since session cookies also expire.
+    with freeze_time(date.today() + timedelta(days=-1)):
+        with capture_registrations() as registrations:
+            data = dict(email="mary@lp.com", password="awesome sunset", next="")
+            client.post("/register", data=data, follow_redirects=True)
 
-    email = registrations[0]["email"]
-    token = registrations[0]["confirm_token"]
-
-    time.sleep(1)
+        email = registrations[0]["email"]
+        token = registrations[0]["confirm_token"]
 
     response = client.get("/confirm/" + token, follow_redirects=True)
     msg = get_message("CONFIRMATION_EXPIRED", within="1 milliseconds", email=email)
@@ -293,25 +292,34 @@ def test_confirmation_different_user_when_logged_in_no_auto(client, get_message)
 @pytest.mark.registerable()
 @pytest.mark.settings(login_without_confirmation=True)
 def test_confirmation_different_user_when_logged_in(client, get_message):
+    # with default no-auto-login - first user should get logged out and second
+    # should be properly confirmed (but not logged in)
     e1 = "dude@lp.com"
     e2 = "lady@lp.com"
 
     with capture_registrations() as registrations:
         for e in e1, e2:
             data = dict(email=e, password="awesome sunset", next="")
-            client.post("/register", data=data)
+            response = client.post("/register", data=data)
+            assert is_authenticated(client, get_message)
             logout(client)
 
     token1 = registrations[0]["confirm_token"]
     token2 = registrations[1]["confirm_token"]
 
-    client.get("/confirm/" + token1, follow_redirects=True)
-    logout(client)
-    authenticate(client, email=e1)
+    response = client.get("/confirm/" + token1, follow_redirects=False)
+    assert "/login" in response.location
+    authenticate(client, email=e1, password="awesome sunset")
+    assert is_authenticated(client, get_message)
 
     response = client.get("/confirm/" + token2, follow_redirects=True)
     assert get_message("EMAIL_CONFIRMED") in response.data
-    assert b"Welcome lady@lp.com" in response.data
+
+    # first user should have been logged out
+    assert not is_authenticated(client, get_message)
+
+    authenticate(client, email=e2, password="awesome sunset")
+    assert is_authenticated(client, get_message)
 
 
 @pytest.mark.registerable()
@@ -352,8 +360,8 @@ def test_confirm_redirect_to_post_confirm(client, get_message):
 
     token = registrations[0]["confirm_token"]
 
-    response = client.get("/confirm/" + token, follow_redirects=True)
-    assert b"Post Confirm" in response.data
+    response = client.get("/confirm/" + token, follow_redirects=False)
+    assert "/post_confirm" in response.location
 
 
 @pytest.mark.registerable()
@@ -361,8 +369,9 @@ def test_confirm_redirect_to_post_confirm(client, get_message):
     redirect_host="localhost:8081",
     redirect_behavior="spa",
     post_confirm_view="/confirm-redirect",
+    confirm_error_view="/confirm-error",
 )
-def test_spa_get(app, client):
+def test_spa_get(app, client, get_message):
     """
     Test 'single-page-application' style redirects
     This uses json only.
@@ -384,6 +393,15 @@ def test_spa_get(app, client):
         assert "/confirm-redirect" == split.path
         qparams = dict(parse_qsl(split.query))
         assert qparams["email"] == "dude@lp.com"
+
+        response = client.get("/confirm/" + token)
+        split = urlsplit(response.headers["Location"])
+        qparams = dict(parse_qsl(split.query))
+        assert response.status_code == 302
+        assert "/confirm-error" in response.location
+        assert "email" not in qparams
+        assert get_message("ALREADY_CONFIRMED") in qparams["info"].encode("utf-8")
+
     # Arguably for json we shouldn't have any - this is buried in register_user
     # but really shouldn't be.
     assert len(flashes) == 1
@@ -399,15 +417,16 @@ def test_spa_get(app, client):
 def test_spa_get_bad_token(app, client, get_message):
     """Test expired and invalid token"""
     with capture_flashes() as flashes:
-        with capture_registrations() as registrations:
-            response = client.post(
-                "/register",
-                json=dict(email="dude@lp.com", password="awesome sunset"),
-                headers={"Content-Type": "application/json"},
-            )
-            assert response.headers["Content-Type"] == "application/json"
-        token = registrations[0]["confirm_token"]
-        time.sleep(1)
+        # Note that we need relatively new-ish date since session cookies also expire.
+        with freeze_time(date.today() + timedelta(days=-1)):
+            with capture_registrations() as registrations:
+                response = client.post(
+                    "/register",
+                    json=dict(email="dude@lp.com", password="awesome sunset"),
+                    headers={"Content-Type": "application/json"},
+                )
+                assert response.headers["Content-Type"] == "application/json"
+            token = registrations[0]["confirm_token"]
 
         response = client.get("/confirm/" + token)
         assert response.status_code == 302
@@ -415,12 +434,10 @@ def test_spa_get_bad_token(app, client, get_message):
         assert "localhost:8081" == split.netloc
         assert "/confirm-error" == split.path
         qparams = dict(parse_qsl(split.query))
-        assert all(k in qparams for k in ["email", "error", "identity"])
-        assert qparams["identity"] == "dude@lp.com"
+        assert "email" not in qparams
+        assert "identity" not in qparams
 
-        msg = get_message(
-            "CONFIRMATION_EXPIRED", within="1 milliseconds", email="dude@lp.com"
-        )
+        msg = get_message("CONFIRMATION_EXPIRED", within="1 milliseconds")
         assert msg == qparams["error"].encode("utf-8")
 
         # Test mangled token
@@ -443,10 +460,27 @@ def test_spa_get_bad_token(app, client, get_message):
     assert len(flashes) == 1
 
 
+@pytest.mark.filterwarnings("ignore")
+@pytest.mark.registerable()
+@pytest.mark.settings(auto_login_after_confirm=True, post_login_view="/postlogin")
+def test_auto_login(app, client, get_message):
+    with capture_registrations() as registrations:
+        data = dict(email="mary@lp.com", password="password", next="")
+        client.post("/register", data=data, follow_redirects=True)
+
+    assert not is_authenticated(client, get_message)
+
+    token = registrations[0]["confirm_token"]
+    response = client.get("/confirm/" + token, follow_redirects=False)
+    assert check_location(app, response.location, "/postlogin")
+    assert is_authenticated(client, get_message)
+
+
+@pytest.mark.filterwarnings("ignore")
 @pytest.mark.two_factor()
 @pytest.mark.registerable()
-@pytest.mark.settings(two_factor_required=True)
-def test_two_factor(app, client):
+@pytest.mark.settings(two_factor_required=True, auto_login_after_confirm=True)
+def test_two_factor(app, client, get_message):
     """If two-factor is enabled, the confirm shouldn't login, but start the
     2-factor setup.
     """
@@ -454,19 +488,17 @@ def test_two_factor(app, client):
         data = dict(email="mary@lp.com", password="password", next="")
         client.post("/register", data=data, follow_redirects=True)
 
-    # make sure not logged in
-    response = client.get("/profile")
-    assert response.status_code == 302
-    assert "/login?next=%2Fprofile" in response.location
+    assert not is_authenticated(client, get_message)
 
     token = registrations[0]["confirm_token"]
     response = client.get("/confirm/" + token, follow_redirects=False)
     assert "tf-setup" in response.location
 
 
+@pytest.mark.filterwarnings("ignore")
 @pytest.mark.two_factor()
 @pytest.mark.registerable()
-@pytest.mark.settings(two_factor_required=True)
+@pytest.mark.settings(two_factor_required=True, auto_login_after_confirm=True)
 def test_two_factor_json(app, client, get_message):
     with capture_registrations() as registrations:
         data = dict(email="dude@lp.com", password="password")
@@ -476,12 +508,7 @@ def test_two_factor_json(app, client, get_message):
         assert len(response.json["response"]) == 2
         assert all(k in response.json["response"] for k in ["csrf_token", "user"])
 
-    # make sure not logged in
-    response = client.get("/profile", headers={"accept": "application/json"})
-    assert response.status_code == 401
-    assert response.json["response"]["errors"][0].encode("utf-8") == get_message(
-        "UNAUTHENTICATED"
-    )
+    assert not is_authenticated(client, get_message)
 
     token = registrations[0]["confirm_token"]
     response = client.get("/confirm/" + token, headers={"Accept": "application/json"})
@@ -506,9 +533,7 @@ def test_email_not_identity(app, client, get_message):
     token = registrations[0]["confirm_token"]
     response = client.get("/confirm/" + token, headers={"Accept": "application/json"})
     assert response.status_code == 302
-    assert "/" in response.location
-
-    logout(client)
+    assert not is_authenticated(client, get_message)
 
     # check that username must be unique
     data = dict(email="mary4@lp.com", username="mary", password="awesome sunset")
@@ -571,3 +596,97 @@ def test_generic_response(app, client, get_message):
     response = client.post("/confirm", json=dict(email="matt@lp.com"))
     assert len(recorded_instructions_sent) == 2
     assert response.status_code == 200
+
+
+def test_generic_with_extra(app, sqlalchemy_datastore):
+    # If application adds a field, make sure we properly return errors
+    # even if 'RETURN_GENERIC_RESPONSES' is set.
+    class MySendConfirmationForm(SendConfirmationForm):
+        recaptcha = StringField("Recaptcha", validators=[Length(min=5)])
+
+    app.config["SECURITY_RETURN_GENERIC_RESPONSES"] = True
+    app.config["SECURITY_SEND_CONFIRMATION_TEMPLATE"] = "generic_confirm.html"
+    app.security = Security(
+        app,
+        datastore=sqlalchemy_datastore,
+        send_confirmation_form=MySendConfirmationForm,
+    )
+
+    populate_data(app)
+    client = app.test_client()
+
+    # Test valid user but invalid additional form field
+    # We should get a form error for the extra (invalid) field, no flash
+    bad_data = dict(email="joe@lp.com", recaptcha="1234")
+    good_data = dict(email="joe@lp.com", recaptcha="123456")
+
+    with capture_flashes() as flashes:
+        response = client.post("/confirm", data=bad_data)
+        assert b"Field must be at least 5" in response.data
+    assert len(flashes) == 0
+    with capture_flashes() as flashes:
+        response = client.post("/confirm", data=good_data)
+    assert len(flashes) == 1
+
+    # JSON
+    with capture_flashes() as flashes:
+        response = client.post("/confirm", json=bad_data)
+        assert response.status_code == 400
+        assert (
+            "Field must be at least 5"
+            in response.json["response"]["field_errors"]["recaptcha"][0]
+        )
+    assert len(flashes) == 0
+    with capture_flashes() as flashes:
+        response = client.post("/confirm", json=good_data)
+        assert response.status_code == 200
+    assert len(flashes) == 0
+
+    # Try bad email AND bad recaptcha
+    bad_data = dict(email="joe44-lp.com", recaptcha="1234")
+    with capture_flashes() as flashes:
+        response = client.post("/confirm", data=bad_data)
+        assert b"Field must be at least 5" in response.data
+    assert len(flashes) == 0
+    with capture_flashes() as flashes:
+        response = client.post("/confirm", json=bad_data)
+        assert response.status_code == 400
+        assert (
+            "Field must be at least 5"
+            in response.json["response"]["field_errors"]["recaptcha"][0]
+        )
+        assert len(response.json["response"]["errors"]) == 1
+    assert len(flashes) == 0
+
+
+@pytest.mark.flask_async()
+@pytest.mark.registerable()
+def test_confirmable_async(app, client, get_message):
+    recorded_confirms = []
+    recorded_instructions_sent = []
+
+    @user_confirmed.connect_via(app)
+    async def on_confirmed(myapp, user):
+        recorded_confirms.append(user)
+
+    @confirm_instructions_sent.connect_via(app)
+    async def on_instructions_sent(myapp, **kwargs):
+        recorded_instructions_sent.append(kwargs["user"])
+
+    email = "dude@lp.com"
+
+    with capture_registrations() as registrations:
+        data = dict(email=email, password="awesome sunset", next="")
+        response = client.post("/register", data=data)
+    assert response.status_code == 302
+    client.post(
+        "/confirm",
+        json=dict(email=email),
+        headers={"Content-Type": "application/json"},
+    )
+    assert len(recorded_instructions_sent) == 1
+
+    # Test confirm
+    token = registrations[0]["confirm_token"]
+    client.get("/confirm/" + token, follow_redirects=False)
+    assert len(recorded_confirms) == 1

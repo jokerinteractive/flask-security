@@ -21,6 +21,7 @@ following is a list of view templates:
 * `security/register_user.html`
 * `security/reset_password.html`
 * `security/change_password.html`
+* `security/change_email.html`
 * `security/send_confirmation.html`
 * `security/send_login.html`
 * `security/verify.html`
@@ -45,8 +46,13 @@ Each template is passed a template context object that includes the following,
 including the objects/values that are passed to the template by the main
 Flask application context processor:
 
-* ``<template_name>_form``: A form object for the view
-* ``security``: The Flask-Security extension object
+* ``<template_name>_form``: A form object for the view.
+* ``security``: The Flask-Security extension object.
+* ``config``: Injected by Flask - this holds all extensions' configuration.
+* ``url_for_security``: A function that returns the configured URL for the passed Security endpoint.
+* ``_fsdomain``: A function used to `tag` strings for extraction and localization.
+* ``_fs_is_user_authenticated``: Returns True if argument (user) is authenticated.
+  Usually the `current_user` proxy is the appropriate argument.
 
 To add more values to the template context, you can specify a context processor
 for all views or a specific view. For example::
@@ -73,6 +79,7 @@ The following is a list of all the available context processor decorators:
 * ``register_context_processor``: Register view
 * ``reset_password_context_processor``: Reset password view
 * ``change_password_context_processor``: Change password view
+* ``change_email_context_processor``: Change email view
 * ``send_confirmation_context_processor``: Send confirmation view
 * ``send_login_context_processor``: Send login view
 * ``mail_context_processor``: Whenever an email will be sent
@@ -122,6 +129,33 @@ be passed if the model looks like::
     various views to no longer function. Many fields have complex (and not
     publicly exposed) validators that have side effects.
 
+.. warning::
+    It is important to ALWAYS subclass the base Flask-Security form and not
+    attempt to just redefine the class. This is due to the validation method
+    of many of the forms performs critical additional validation AND will change
+    or add values to the form as a side-effect. See below for how to do this.
+
+If you need to override an existing field in a form (to override/add validators),
+and you want to define a re-usable validator - use multiple inheritance - be extremely
+careful about the order of the inherited classes::
+
+    from wtforms import PasswordField, ValidationError
+    from wtforms.validators import DataRequired
+
+    def password_validator(form, field):
+        if field.data.startswith("PASS"):
+            raise ValidationError("Really - don't start a password with PASS")
+
+    class NewPasswordFormMixinEx:
+        password = PasswordField("password",
+                                 validators=[DataRequired(message="PASSWORD_NOT_PROVIDED"),
+                                             password_validator])
+
+    class MyRegisterForm(NewPasswordFormMixinEx, ConfirmRegisterForm):
+        pass
+
+    app.config["SECURITY_CONFIRM_REGISTER_FORM"] = MyRegisterForm
+
 The following is a list of all the available form overrides:
 
 * ``login_form``: Login form
@@ -131,6 +165,7 @@ The following is a list of all the available form overrides:
 * ``forgot_password_form``: Forgot password form
 * ``reset_password_form``: Reset password form
 * ``change_password_form``: Change password form
+* ``change_email_form``: Change email form
 * ``send_confirmation_form``: Send confirmation form
 * ``mf_recovery_codes_form``: Setup recovery codes form
 * ``mf_recovery_form``: Use recovery code form
@@ -259,8 +294,7 @@ appropriate input attributes can be set)::
 Localization
 ------------
 All messages, form labels, and form strings are localizable. Flask-Security uses
-`Flask-Babel <https://pypi.org/project/Flask-Babel/>`_ or
-`Flask-BabelEx <https://pythonhosted.org/Flask-BabelEx/>`_ to manage its messages.
+`Flask-Babel <https://pypi.org/project/Flask-Babel/>`_ to manage its messages.
 
 .. tip::
     Be sure to explicitly initialize your babel extension::
@@ -292,7 +326,7 @@ and/or a specific translation). Adding the following to your app::
 
     app.config["SECURITY_MSG_INVALID_PASSWORD"] = ("Password no-worky", "error")
 
-Will change the default message in english.
+will change the default message in english.
 
 .. tip::
     The string messages themselves are a 'key' into the translation .po/.mo files.
@@ -317,10 +351,7 @@ Then compile it with::
 
 Finally add your translations directory to your configuration::
 
-    app.config["SECURITY_I18N_DIRNAME"] = [pkg_resources.resource_filename("flask_security", "translations"), "translations"]
-
-.. note::
-    This only works when using Flask-Babel since Flask-BabelEx doesn't support a list of translation directories.
+    app.config["SECURITY_I18N_DIRNAME"] = ["builtin", "translations"]
 
 .. _emails_topic:
 
@@ -341,6 +372,8 @@ The following is a list of email templates:
 * `security/email/reset_notice.txt`
 * `security/email/change_notice.txt`
 * `security/email/change_notice.html`
+* `security/email/change_email_instructions.txt`
+* `security/email/change_email_instructions.html`
 * `security/email/welcome.html`
 * `security/email/welcome.txt`
 * `security/email/welcome_existing.html`
@@ -391,6 +424,9 @@ welcome                         SECURITY_SEND_REGISTER_EMAIL         SECURITY_EM
 confirmation_instructions       N/A                                  SECURITY_EMAIL_SUBJECT_CONFIRM                    - user                 confirm_instructions_sent
                                                                                                                        - confirmation_link
                                                                                                                        - confirmation_token
+change_email_instructions       N/A                                  SECURITY_CHANGE_EMAIL_SUBJECT                     - user                 change_email_instructions_sent
+                                                                                                                       - link
+                                                                                                                       - token
 login_instructions              N/A                                  SECURITY_EMAIL_SUBJECT_PASSWORDLESS               - user                 login_instructions_sent
                                                                                                                        - login_link
                                                                                                                        - login_token
@@ -438,7 +474,7 @@ This is supported by providing your own implementation of the :class:`.MailUtil`
     from flask_security import MailUtil
     class MyMailUtil(MailUtil):
 
-        def send_mail(self, template, subject, recipient, sender, body, html, user, **kwargs):
+        def send_mail(self, template, subject, recipient, sender, body, html, **kwargs):
             send_flask_mail.delay(
                 subject=subject,
                 from_email=sender,
@@ -502,13 +538,13 @@ it on `app.json_provider_cls`.
 401, 403, Oh My
 +++++++++++++++
 For a very long read and discussion; look at `this`_. Out of the box, Flask-Security in
-tandem with Flask-Login, behave as follows:
+tandem with Flask-Login, behaves as follows:
 
     * If authentication fails as the result of a `@login_required`, `@auth_required("session", "token")`,
       or `@token_auth_required` then if the request 'wants' a JSON
-      response, :meth:`.Security.render_json` is called with a 401 status code. If not
-      then flask_login.LoginManager.unauthorized() is called. By default THAT will redirect to
-      a login view.
+      response, :meth:`.Security.render_json` is called with a 401 status code.
+      If not then the `SECURITY_MSG_UNAUTHENTICATED` message is flashed and the request is
+      redirected to the `login` view.
 
     * If authentication fails as the result of a `@http_auth_required` or `@auth_required("basic")`
       then a 401 is returned along with the http header ``WWW-Authenticate`` set to
@@ -536,19 +572,20 @@ The decision on whether to return JSON is based on:
 Redirects
 ---------
 Flask-Security uses redirects frequently (when using forms), and most of the redirect
-destinations are configurable. When Flask-Security initiates a redirect it always (mostly) flashes a message
-that provides some context. In addition, Flask-Security - both in its views and default templates attempt to propagate
+destinations are configurable. When Flask-Security initiates a redirect it (almost) always flashes a message
+that provides some context for the user.
+In addition, Flask-Security - both in its views and default templates, attempts to propagate
 any `next` query param and in fact, an existing `?next=/xx` will override most of the configuration redirect URLs.
 
 As a complex example consider an unauthenticated user accessing a `@auth_required` endpoint, and the user has
 two-factor authentication set up.:
 
-    * GET("/protected") - The `default_unauthn_handler` via Flask-Login will redirect to ``/login?next=/protected``
+    * GET("/protected") - The `default_unauthn_handler` will redirect to ``/login?next=/protected``
     * The login form/template will pick any `?next=/xx` argument off the request URL and append it to form action.
     * When the form is submitted if will do a POST("/login?next=/protected")
     * Assuming correct authentication, the system will send out a 2-factor code and redirect to ``/tf-verify?next=/protected``
     * The two_factor_validation_form/template also pulls any `?next=/xx` and appends to the form action.
     * When the `tf-validate` form is submitted it will do a POST("/tf-validate?next=/protected").
     * Assuming a correct code, the user is authenticated and is redirected. That redirection first
-      looks for a 'next' in the request.args then in request.form and finally will use the value of `SECURITY_POST_LOGIN_VIEW`.
+      looks for a 'next' in the request.args then in request.form and finally will use the value of :py:data:`SECURITY_POST_LOGIN_VIEW`.
       In this example it will find the ``next=/protected`` in the request.args and redirect to ``/protected``.
