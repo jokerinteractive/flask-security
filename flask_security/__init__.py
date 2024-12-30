@@ -22,6 +22,7 @@ from .core import (
     current_user,
 )
 from .datastore import (
+    FSQLALiteUserDatastore,
     UserDatastore,
     SQLAlchemyUserDatastore,
     AsaList,
@@ -44,20 +45,21 @@ from .decorators import (
     unauth_csrf,
 )
 from .forms import (
-    Form,
     ChangePasswordForm,
+    ConfirmRegisterForm,
+    Form,
     ForgotPasswordForm,
     LoginForm,
+    PasswordlessLoginForm,
     RegisterForm,
     ResetPasswordForm,
-    PasswordlessLoginForm,
-    ConfirmRegisterForm,
     SendConfirmationForm,
     TwoFactorRescueForm,
     TwoFactorSetupForm,
     TwoFactorVerifyCodeForm,
-    VerifyForm,
     unique_identity_attribute,
+    UsernameRecoveryForm,
+    VerifyForm,
 )
 from .mail_util import MailUtil, EmailValidateException
 from .oauth_glue import OAuthGlue
@@ -70,6 +72,8 @@ from .recovery_codes import (
     MfRecoveryCodesForm,
 )
 from .signals import (
+    change_email_confirmed,
+    change_email_instructions_sent,
     confirm_instructions_sent,
     login_instructions_sent,
     password_changed,
@@ -84,6 +88,7 @@ from .signals import (
     user_confirmed,
     user_registered,
     user_not_registered,
+    username_recovery_email_sent,
     us_security_token_sent,
     us_profile_changed,
     wan_deleted,
@@ -106,7 +111,6 @@ from .utils import (
     check_and_get_token_status,
     get_hmac,
     get_request_attr,
-    get_token_status,
     get_url,
     hash_password,
     check_and_update_authn_fresh,
@@ -137,4 +141,4 @@ from .webauthn import (
 )
 from .webauthn_util import WebauthnUtil
 
-__version__ = "5.4.4"
+__version__ = "5.5.2"

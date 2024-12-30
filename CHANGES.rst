@@ -3,19 +3,101 @@ Flask-Security Changelog
 
 Here you can see the full list of changes between each Flask-Security release.
 
-Version 5.5.0
+Version 5.6.0
 -------------
 
 Released TBD
 
-Features
-++++++++
+Features & Improvements
++++++++++++++++++++++++
+- (:issue:`1038`) Add support for 'secret_key' rotation
+- (:issue:`980`) Add support for username recovery in simple login flows
+- (:pr:`xx`) Add support for Python 3.13
+
+Notes
++++++
+Python 3.13 removed ``crypt``, which passlib attempts to import and use as
+part of its safe_crypt() method (fallback is to return None).
+However - that method only appears to be called in a few crypt handlers and
+for bcrypt - only for the built-in bcrypt - not if the bcrypt package is installed.
+passlib is not maintained - a new fork (10/1/2024) (https://pypi.org/project/libpass/)
+seems promising and has been tested with python 3.13. If that fork matures we will
+change the dependencies appropriately.
+
+Version 5.5.2
+-------------
+
+Released August 5, 2024
+
+More attempts to upload to pypi both flask-security and flask-security-too.
+No code changes - however the build manifest changed so the source distribution
+contents might be slightly different.
+
+Docs and Chores
++++++++++++++++
+- (:pr:`1019`) Separate publish workflows for each pypi package
+
+Version 5.5.1
+-------------
+
+Released August 1, 2024
+
+I am pleased to announce that Flask-Security-Too is now part of pallets-eco and has returned
+to be released as 'Flask-Security'. For the foreseeable future, we will publish the same release to both
+Flask-Security and Flask-Security-Too on PyPI.
+
+There are no code changes.
+
+Docs and Chores
++++++++++++++++
+- (:pr:`1015`) Convert docs, links, badges, etc to pallets-eco
+
+Version 5.5.0
+-------------
+
+Released July 24, 2024
+
+Features & Improvements
++++++++++++++++++++++++
 - (:issue:`956`) Add support for changing registered user's email (:py:data:`SECURITY_CHANGE_EMAIL`).
+- (:issue:`944`) Change default password hash to argon2 (was bcrypt). See below for details.
+- (:pr:`990`) Add freshness capability to auth tokens (enables /us-setup to function w/ just auth tokens).
+- (:pr:`991`) Add support to /tf-setup to not require sessions (use a state token).
+- (:issue:`994`) Add support for Flask-SQLAlchemy-Lite - including new all-inclusive models
+  that conform to sqlalchemy latest best-practice (type-annotated).
+- (:pr:`1007`) Convert other sqlalchemy-based datastores from legacy 'model.query' to best-practice 'select'
+- (:issue:`983`) Allow applications more flexibility defining allowable redirects.
 
 Fixes
 +++++
 - (:pr:`972`) Set :py:data:`SECURITY_CSRF_COOKIE` at beginning (GET /login) of authentication
   ritual - just as we return the CSRF token. (thanks @e-goto)
+- (:issue:`973`) login and unified sign in should handle GET for authenticated user consistently.
+- (:pr:`995`) Don't show sms options if not defined in US_ENABLED_METHODS. (fredipevcin)
+- (:pr:`1009`) Change :py:data:`SECURITY_DEPRECATED_HASHING_SCHEMES` to ``["auto"]``.
+
+Docs and Chores
++++++++++++++++
+- (:pr:`979`) Update Russian translations (ademaro)
+- (:pr:`1004`) Update ES and IT translations (gissimo)
+- (:pr:`981` and :pr:`977`) Improve docs
+- (:pr:`992`) The long deprecated `get_token_status` is no longer exported
+- (:pr:`992`) Drop Python 3.8 support.
+- (:issue:`1001`) Try a different approach to typing User and Role models.
+
+Backwards Compatibility Concerns
++++++++++++++++++++++++++++++++++
+- Notes around the change to argon2 as the default password hash:
+    - applications should add the argon2_cffi package to their requirements (it is included in the flask_security[common] extras).
+    - leave bcrypt installed so that old passwords still work.
+    - the default configuration will re-hash passwords with argon2 upon first use.
+- Changes to /tf-setup
+    The old path - using state set in the session still works as before. The new path is
+    just for the case an authenticated user wants to change their 2FA setup.
+- Changes to sqlalchemy-based datastores
+    Flask-Security no longer uses the legacy model.query - all DB access is done via
+    `select(xx).where(xx)`. As a result the find_user() method now only takes a SINGLE
+    column:value from its kwargs - in prior releases all kwargs were passed into the query.filter.
 
 Version 5.4.3
 -------------
@@ -28,7 +110,7 @@ Fixes
 - (:issue:`954`) CSRF not properly ignored for application forms using :py:data:`SECURITY_CSRF_PROTECT_MECHANISMS`.
 - (:pr:`957`) Improve jp translations (e-goto)
 - (:issue:`959`) Regression - datetime_factory should still be an attribute (thanks TimotheeJeannin)
-- (:issue:`942`) :py:data:`SECURITY_RETURN_GENERIC_RESPONSES` hide email validation/syntax errors.
+- (:issue:`942`) :py:data:`SECURITY_RETURN_GENERIC_RESPONSES` hid email validation/syntax errors.
 
 Version 5.4.2
 -------------
@@ -125,7 +207,7 @@ Backwards Compatibility Concerns
     - Flask-Login's FORCE_HOST_FOR_REDIRECTS configuration isn't honored
     - Flask-Login's USE_SESSION_FOR_NEXT configuration isn't honored
     - The flashed message is SECURITY_MSG_UNAUTHENTICATED rather than SECURITY_MSG_LOGIN.
-      Furthermore SECURITY_MSG_UNAUTHENTICATED was reworded to read better.
+      Furthermore, SECURITY_MSG_UNAUTHENTICATED was reworded to read better.
     - Flask-Login uses `urlencode` to encode the `next` query param - which quotes the '/' character.
       Werkzeug (which Flask-Security uses to build the URL) uses `quote`
       which considers '/' a safe character and isn't encoded.
@@ -143,7 +225,7 @@ Backwards Compatibility Concerns
   Flask-Security now changes any `None` key to `""`.
 - The default unauthorized handler behavior has changed slightly and is now documented. The default
   (:data:`SECURITY_UNAUTHORIZED_VIEW` == ``None``) has not changed (a default HTTP 403 response).
-  The precise behavior when :data:`SECURITY_UNAUTHORIZED_VIEW` was set was never documented.
+  The precise behavior when :data:`SECURITY_UNAUTHORIZED_VIEW` is set was never documented.
   The important change is that Flask-Security no longer ever looks at the request.referrer header and
   will never redirect to it. If an application needs that, it can provide a callable that can return
   that or any other header.
@@ -303,7 +385,7 @@ Fixes
 Known Issues
 ++++++++++++
 
-- Flask-mongoengine hasn't released in a while and currently will not work with latest Flask and Flask-Security-Too
+- Flask-mongoengine hasn't released in a while and currently will not work with latest Flask and Flask-Security-Too/Flask-Security
   (this is due to the JSONEncoder being deprecated and removed).
 
 Backwards Compatibility Concerns
@@ -872,8 +954,8 @@ using an authenticator app b) the qrcode is only available during the time
 the user is first setting up their authentication app.
 The QRcode issue has been fixed in 4.0.
 
-.. _qrcode: https://github.com/Flask-Middleware/flask-security/issues/418
-.. _login: https://github.com/Flask-Middleware/flask-security/issues/421
+.. _qrcode: https://github.com/pallets-eco/flask-security/issues/418
+.. _login: https://github.com/pallets-eco/flask-security/issues/421
 
 Fixed
 +++++

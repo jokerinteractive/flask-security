@@ -18,15 +18,13 @@ from tests.test_utils import (
     logout,
 )
 
-from flask_security import Security
-from flask_security.core import UserMixin
+from flask_security import Security, UserMixin, user_registered, user_not_registered
 from flask_security.forms import (
     ConfirmRegisterForm,
     RegisterForm,
     StringField,
     _default_field_labels,
 )
-from flask_security.signals import user_registered, user_not_registered
 from flask_security.utils import localize_callback
 
 pytestmark = pytest.mark.registerable()
@@ -517,7 +515,8 @@ def test_form_error(app, client, get_message):
 
 @pytest.mark.settings(username_enable=True)
 @pytest.mark.unified_signin()
-def test_username(app, client, get_message):
+def test_username(app, clients, get_message):
+    client = clients
     data = dict(
         email="dude@lp.com",
         username="dude",

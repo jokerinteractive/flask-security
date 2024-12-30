@@ -17,6 +17,13 @@ These configuration keys are used globally across all features.
     This is actually part of Flask - but is used by Flask-Security to sign all tokens.
     It is critical this is set to a strong value. For python3 consider using: ``secrets.token_urlsafe()``
 
+.. py:data:: SECRET_KEY_FALLBACKS
+
+    This is part of Flask (>=3.1) but can be used by Flask-Security to unsign tokens.
+    See Flask documentation https://flask.palletsprojects.com/en/stable/config/#SECRET_KEY_FALLBACKS
+
+    .. versionadded:: 5.6.0
+
 .. py:data:: SECURITY_BLUEPRINT_NAME
 
     Specifies the name for the Flask-Security blueprint.
@@ -54,7 +61,9 @@ These configuration keys are used globally across all features.
     Default: ``None``.
 .. py:data:: SECURITY_FLASH_MESSAGES
 
-    Specifies whether or not to flash messages during security procedures.
+    Specifies whether or not to flash messages for actions certain endpoint perform.
+    Normally Flash-Security views will flash informational or error messages only when the operation
+    results in a redirect.
 
     Default: ``True``.
 .. py:data:: SECURITY_I18N_DOMAIN
@@ -74,135 +83,6 @@ These configuration keys are used globally across all features.
     .. versionchanged:: 5.2.0
         "builtin" is a special name which will be interpreted as the ``translations``
         directory within the installation of Flask-Security.
-
-.. py:data:: SECURITY_PASSWORD_HASH
-
-    Specifies the password hash algorithm to use when hashing passwords.
-    Recommended values for production systems are ``bcrypt``, ``argon2``, ``sha512_crypt``, or
-    ``pbkdf2_sha512``. Some algorithms require the installation  of a backend package (e.g. `bcrypt`_, `argon2`_).
-
-    Default: ``"bcrypt"``.
-
-.. py:data:: SECURITY_PASSWORD_SCHEMES
-
-    List of supported password hash algorithms. ``SECURITY_PASSWORD_HASH``
-    must be from this list. Passwords encrypted with any of these schemes will be honored.
-
-.. py:data:: SECURITY_DEPRECATED_PASSWORD_SCHEMES
-
-    List of password hash algorithms that are considered weak and
-    will be accepted, however on first use, will be re-hashed to the current
-    setting of ``SECURITY_PASSWORD_HASH``.
-
-    Default: ``["auto"]`` which means any password found that wasn't
-    hashed using ``SECURITY_PASSWORD_HASH`` will be re-hashed.
-
-.. py:data:: SECURITY_PASSWORD_SALT
-
-    Specifies the HMAC salt. This is required for all schemes that
-    are configured for double hashing. A good salt can be generated using:
-    ``secrets.SystemRandom().getrandbits(128)``.
-
-    Default: ``None``.
-
-.. py:data:: SECURITY_PASSWORD_SINGLE_HASH
-
-    A list of schemes that should not be hashed twice. By default, passwords are
-    hashed twice, first with :py:data:`SECURITY_PASSWORD_SALT`, and then with a random salt.
-
-    Default: a list of known schemes not working with double hashing (`django_{digest}`, `plaintext`).
-
-.. py:data:: SECURITY_HASHING_SCHEMES
-
-    List of algorithms used for encrypting/hashing sensitive data within a token
-    (Such as is sent with confirmation or reset password).
-
-    Default: ``["sha256_crypt", "hex_md5"]``.
-.. py:data:: SECURITY_DEPRECATED_HASHING_SCHEMES
-
-    List of deprecated algorithms used for creating and validating tokens.
-
-    Default: ``["hex_md5"]``.
-
-.. py:data:: SECURITY_PASSWORD_HASH_OPTIONS
-
-    Specifies additional options to be passed to the hashing method. This is deprecated as of passlib 1.7.
-
-    .. deprecated:: 3.4.0 see: :py:data:`SECURITY_PASSWORD_HASH_PASSLIB_OPTIONS`
-
-.. py:data:: SECURITY_PASSWORD_HASH_PASSLIB_OPTIONS
-
-    Pass additional options to the various hashing methods. This is a
-    dict of the form ``{<scheme>__<option>: <value>, ..}``
-    e.g. {"argon2__rounds": 10}.
-
-    .. versionadded:: 3.3.1
-
-.. py:data:: SECURITY_PASSWORD_LENGTH_MIN
-
-    Minimum required length for passwords.
-
-    Default: ``8``
-
-    .. versionadded:: 3.4.0
-.. py:data:: SECURITY_PASSWORD_COMPLEXITY_CHECKER
-
-    Set to complexity checker to use (Only ``zxcvbn`` supported).
-
-    Default: ``None``
-
-    .. versionadded:: 3.4.0
-.. py:data:: SECURITY_ZXCVBN_MINIMUM_SCORE
-
-    Required ``zxcvbn`` password complexity score (0-4).
-    Refer to https://github.com/dropbox/zxcvbn#usage for exact meanings of
-    different score values.
-
-    Default: ``3`` (Good or Strong)
-
-    .. versionadded:: 5.0.0
-.. py:data:: SECURITY_PASSWORD_CHECK_BREACHED
-
-    If not ``None`` new/changed passwords will be checked against the
-    database of breached passwords at https://api.pwnedpasswords.com.
-    If set to ``strict`` then if the site can't be reached, validation will fail.
-    If set to ``best-effort`` failure to reach the site will continue
-    with the rest of password validation.
-
-    Default: ``None``
-
-    .. versionadded:: 3.4.0
-.. py:data:: SECURITY_PASSWORD_BREACHED_COUNT
-
-    Passwords with counts greater than or equal to this value are considered breached.
-
-    Default: 1  - which might be to burdensome for some applications.
-
-    .. versionadded:: 3.4.0
-
-.. py:data:: SECURITY_PASSWORD_NORMALIZE_FORM
-
-    Passwords are normalized prior to changing or comparing. This satisfies
-    the NIST requirement: `5.1.1.2 Memorized Secret Verifiers`_.
-    Normalization is performed using the Python unicodedata.normalize() method.
-
-    Default: ``"NFKD"``
-
-    .. versionadded:: 4.0.0
-
-.. _5.1.1.2 Memorized Secret Verifiers: https://pages.nist.gov/800-63-3/sp800-63b.html#sec5
-
-.. py:data:: SECURITY_PASSWORD_REQUIRED
-
-    If set to ``False`` then a user can register with an empty password.
-    This requires :py:data:`SECURITY_UNIFIED_SIGNIN` to be enabled. By
-    default, the user will be able to authenticate using an email link.
-    Please note: this does not mean a user can sign in with an empty
-    password - it means that they must have some OTHER means of authenticating.
-
-    Default: ``True``
-
-    .. versionadded:: 5.0.0
 
 .. py:data:: SECURITY_TOKEN_AUTHENTICATION_KEY
 
@@ -309,12 +189,40 @@ These configuration keys are used globally across all features.
 
     If ``True`` then subdomains (and the root domain) of the top-level host set
     by Flask's ``SERVER_NAME`` configuration will be allowed as post-view redirect targets.
-    This is beneficial if you wish to place your authentiation on one subdomain and
+    This is beneficial if you wish to place your authentication on one subdomain and
     authenticated content on another, for example ``auth.domain.tld`` and ``app.domain.tld``.
 
     Default: ``False``.
 
     .. versionadded:: 4.0.0
+
+.. py:data:: SECURITY_REDIRECT_BASE_DOMAIN
+
+    Set the base domain for checking allowable redirects. The intent here is to
+    allow an application to be server on e.g. "flaskapp.my.org" and redirect
+    to "myservice.my.org" (which maybe isn't a Flask app). Flask's SERVER_NAME
+    can't be used to verify redirects in this case. Note that in most cases
+    the application will want to set Flask's SESSION_COOKIE_DOMAIN to be this base domain -
+    otherwise authorization information won't be sent.
+
+    Default: ``None``
+
+    .. versionadded:: 5.5.0
+
+.. py:data:: SECURITY_REDIRECT_ALLOWED_SUBDOMAINS
+
+    A list of subdomains. Each will be prepended to
+    ``SECURITY_REDIRECT_BASE_DOMAIN`` and checked against the requested redirect.
+
+    Default: ``[]``
+
+    .. versionadded:: 5.5.0
+
+
+.. note::
+    The above 4 config options apply BOTH to the handling of ``next`` parameter
+    as well as all the ``XXX_VIEW`` URL configuration options
+    for those views that perform a redirect after processing.
 
 .. py:data:: SECURITY_CSRF_PROTECT_MECHANISMS
 
@@ -385,7 +293,7 @@ These configuration keys are used globally across all features.
     Mapping functions take a single argument - ``identity`` from the form
     and should return ``None`` if the ``identity`` argument isn't in a format
     suitable for the attribute. If the ``identity`` argument format matches, it
-    should be returned, optionally having had some canonicalization performed.
+    should be returned, optionally having had some normalization performed.
     The returned result will be used to look up the identity in the UserDataStore
     using the column name specified in the key.
 
@@ -393,7 +301,7 @@ These configuration keys are used globally across all features.
     phone number normalization using the ``phonenumbers`` package.
 
     .. tip::
-        If your mapper performs any sort of canonicalization/normalization,
+        If your mapper performs any sort of normalization,
         make sure you apply the exact same transformation in your form validator
         when setting the field.
 
@@ -465,6 +373,210 @@ These configuration keys are used globally across all features.
 
     .. versionadded:: 5.0.0
 
+.. py:data:: SECURITY_FRESHNESS
+
+    A timedelta used to protect endpoints that alter sensitive information.
+    This is used to protect the following endpoints:
+
+        - :py:data:`SECURITY_US_SETUP_URL`
+        - :py:data:`SECURITY_TWO_FACTOR_SETUP_URL`
+        - :py:data:`SECURITY_WAN_REGISTER_URL`
+        - :py:data:`SECURITY_WAN_DELETE_URL`
+        - :py:data:`SECURITY_MULTI_FACTOR_RECOVERY_CODES`
+        - :py:data:`SECURITY_CHANGE_EMAIL_URL`
+
+    Setting this to a negative number will disable any freshness checking and
+    the endpoints:
+
+        - :py:data:`SECURITY_VERIFY_URL`
+        - :py:data:`SECURITY_US_VERIFY_URL`
+        - :py:data:`SECURITY_US_VERIFY_SEND_CODE_URL`
+        - :py:data:`SECURITY_WAN_VERIFY_URL`
+
+    won't be registered.
+    Setting this to 0 results in undefined behavior.
+    Please see :meth:`flask_security.check_and_update_authn_fresh` for details.
+
+    .. note::
+        The timestamp of when the caller/user last successfully authenticated is
+        stored in the session as well as authentication token.
+
+    Default: timedelta(hours=24)
+
+    .. versionadded:: 3.4.0
+
+.. py:data:: SECURITY_FRESHNESS_GRACE_PERIOD
+
+    A timedelta that provides a grace period when altering sensitive
+    information. This ensures that multi-step operations don't get denied
+    because the session/token happens to expire mid-step.
+
+    Note that this is not implemented for freshness information carried in the
+    auth token.
+
+    N.B. To avoid strange behavior, be sure to set the grace period less than
+    the freshness period.
+    Please see :meth:`flask_security.check_and_update_authn_fresh` for details.
+
+    Default: timedelta(hours=1)
+
+    .. versionadded:: 3.4.0
+
+.. py:data:: SECURITY_FRESHNESS_ALLOW_AUTH_TOKEN
+
+    Controls whether the freshness data set in the auth token can be used to
+    satisfy freshness checks. Some applications might want to force freshness
+    protected endpoints to always use browser based access with sessions - they
+    should set this to ``False``.
+
+    Default: ``True``
+
+
+    .. versionadded:: 5.5.0
+
+Core - Passwords and Tokens
+----------------------------
+.. py:data:: SECURITY_PASSWORD_HASH
+
+    Specifies the password hash algorithm to use when hashing passwords.
+    Recommended values for production systems are ``argon2``, ``bcrypt``, or
+    ``pbkdf2_sha512``. Some algorithms require the installation  of a backend package (e.g. `bcrypt`_, `argon2`_).
+
+    Default: ``"argon2"``.
+
+    .. versionchanged:: 5.5.0
+        Default changed from ``bcrypt`` to ``argon2``.
+
+.. py:data:: SECURITY_PASSWORD_SCHEMES
+
+    List of supported password hash algorithms. ``SECURITY_PASSWORD_HASH``
+    must be from this list. Passwords encrypted with any of these schemes will be honored.
+    This is passed directly to `passlib's CryptoContext`_.
+
+.. py:data:: SECURITY_DEPRECATED_PASSWORD_SCHEMES
+
+    List of password hash algorithms that are considered weak and
+    will be accepted, however on first use, will be re-hashed to the current
+    setting of ``SECURITY_PASSWORD_HASH``.
+    This is passed directly to `passlib's CryptoContext`_.
+
+    Default: ``["auto"]`` which means any password found that wasn't
+    hashed using ``SECURITY_PASSWORD_HASH`` will be re-hashed.
+
+.. py:data:: SECURITY_PASSWORD_SALT
+
+    Specifies the HMAC salt. This is required for all schemes that
+    are configured for double hashing. A good salt can be generated using:
+    ``secrets.SystemRandom().getrandbits(128)``.
+
+    Default: ``None``.
+
+.. py:data:: SECURITY_PASSWORD_SINGLE_HASH
+
+    A list of schemes that should not be hashed twice. By default, passwords are
+    hashed twice, first with :py:data:`SECURITY_PASSWORD_SALT`, and then with a random salt.
+
+    Default: a list of known schemes not working with double hashing (`django_{digest}`, `plaintext`).
+
+.. py:data:: SECURITY_HASHING_SCHEMES
+
+    List of algorithms used for encrypting/hashing sensitive data within a token
+    (Such as is sent with confirmation or reset password).
+    This is passed directly to `passlib's CryptoContext`_.
+
+    Default: ``["sha256_crypt", "hex_md5"]``.
+.. py:data:: SECURITY_DEPRECATED_HASHING_SCHEMES
+
+    List of deprecated algorithms used for creating and validating tokens.
+    This is passed directly to `passlib's CryptoContext`_.
+
+    Default: ``["auto"]``.
+
+.. versionchanged:: 5.5.0
+        Default changed from ``hex_md5`` to ``auto``.
+
+.. py:data:: SECURITY_PASSWORD_HASH_OPTIONS
+
+    Specifies additional options to be passed to the hashing method. This is deprecated as of passlib 1.7.
+
+    .. deprecated:: 3.4.0 see: :py:data:`SECURITY_PASSWORD_HASH_PASSLIB_OPTIONS`
+
+.. py:data:: SECURITY_PASSWORD_HASH_PASSLIB_OPTIONS
+
+    Pass additional options through ``passlib`` to the various hashing methods.
+    This is a dict of the form ``{<scheme>__<option>: <value>, ..}``
+    e.g. {"argon2__time_cost": 3}.
+
+    Default: ``{}``
+
+    .. versionadded:: 3.3.1
+
+.. py:data:: SECURITY_PASSWORD_LENGTH_MIN
+
+    Minimum required length for passwords.
+
+    Default: ``8``
+
+    .. versionadded:: 3.4.0
+.. py:data:: SECURITY_PASSWORD_COMPLEXITY_CHECKER
+
+    Set to complexity checker to use (Only ``zxcvbn`` supported).
+
+    Default: ``None``
+
+    .. versionadded:: 3.4.0
+.. py:data:: SECURITY_ZXCVBN_MINIMUM_SCORE
+
+    Required ``zxcvbn`` password complexity score (0-4).
+    Refer to https://github.com/dropbox/zxcvbn#usage for exact meanings of
+    different score values.
+
+    Default: ``3`` (Good or Strong)
+
+    .. versionadded:: 5.0.0
+.. py:data:: SECURITY_PASSWORD_CHECK_BREACHED
+
+    If not ``None`` new/changed passwords will be checked against the
+    database of breached passwords at https://api.pwnedpasswords.com.
+    If set to ``strict`` then if the site can't be reached, validation will fail.
+    If set to ``best-effort`` failure to reach the site will continue
+    with the rest of password validation.
+
+    Default: ``None``
+
+    .. versionadded:: 3.4.0
+.. py:data:: SECURITY_PASSWORD_BREACHED_COUNT
+
+    Passwords with counts greater than or equal to this value are considered breached.
+
+    Default: 1  - which might be to burdensome for some applications.
+
+    .. versionadded:: 3.4.0
+
+.. py:data:: SECURITY_PASSWORD_NORMALIZE_FORM
+
+    Passwords are normalized prior to changing or comparing. This satisfies
+    the NIST requirement: `5.1.1.2 Memorized Secret Verifiers`_.
+    Normalization is performed using the Python unicodedata.normalize() method.
+
+    Default: ``"NFKD"``
+
+    .. versionadded:: 4.0.0
+
+.. _5.1.1.2 Memorized Secret Verifiers: https://pages.nist.gov/800-63-3/sp800-63b.html#sec5
+
+.. py:data:: SECURITY_PASSWORD_REQUIRED
+
+    If set to ``False`` then a user can register with an empty password.
+    This requires :py:data:`SECURITY_UNIFIED_SIGNIN` to be enabled. By
+    default, the user will be able to authenticate using an email link.
+    Please note: this does not mean a user can sign in with an empty
+    password - it means that they must have some OTHER means of authenticating.
+
+    Default: ``True``
+
+    .. versionadded:: 5.0.0
+
 Core - Multi-factor
 -------------------
 These are used by the Two-Factor and Unified Signin features.
@@ -522,56 +634,6 @@ These are used by the Two-Factor and Unified Signin features.
     be accepted.
 
     Default: ``"US"``
-
-    .. versionadded:: 3.4.0
-
-.. py:data:: SECURITY_FRESHNESS
-
-    A timedelta used to protect endpoints that alter sensitive information.
-    This is used to protect the following endpoints:
-
-        - :py:data:`SECURITY_US_SETUP_URL`
-        - :py:data:`SECURITY_TWO_FACTOR_SETUP_URL`
-        - :py:data:`SECURITY_WAN_REGISTER_URL`
-        - :py:data:`SECURITY_MULTI_FACTOR_RECOVERY_CODES`
-
-    Setting this to a negative number will disable any freshness checking and
-    the endpoints:
-
-        - :py:data:`SECURITY_VERIFY_URL`
-        - :py:data:`SECURITY_US_VERIFY_URL`
-        - :py:data:`SECURITY_US_VERIFY_SEND_CODE_URL`
-        - :py:data:`SECURITY_WAN_VERIFY_URL`
-
-    won't be registered.
-    Setting this to 0 results in undefined behavior.
-    Please see :meth:`flask_security.check_and_update_authn_fresh` for details.
-
-    .. note::
-        This stores freshness information in the session - which must be presented
-        (usually via a Cookie) to the above endpoints. To disable this, set it
-        to ``timedelta(minutes=-1)``
-
-    Default: timedelta(hours=24)
-
-    .. versionadded:: 3.4.0
-
-.. py:data:: SECURITY_FRESHNESS_GRACE_PERIOD
-
-    A timedelta that provides a grace period when altering sensitive
-    information.
-    This is used to protect the endpoints:
-
-        - :py:data:`SECURITY_US_SETUP_URL`
-        - :py:data:`SECURITY_TWO_FACTOR_SETUP_URL`
-        - :py:data:`SECURITY_WAN_REGISTER_URL`
-        - :py:data:`SECURITY_MULTI_FACTOR_RECOVERY_CODES`
-
-    N.B. To avoid strange behavior, be sure to set the grace period less than
-    the freshness period.
-    Please see :meth:`flask_security.check_and_update_authn_fresh` for details.
-
-    Default: timedelta(hours=1)
 
     .. versionadded:: 3.4.0
 
@@ -653,6 +715,14 @@ Core - rarely need changing
 .. py:data:: SECURITY_WAN_SALT
 
     Default: ``"wan-salt"``
+.. py:data:: SECURITY_TWO_FACTOR_SETUP_SALT
+
+    Default: ``"tf-setup-salt"``
+.. py:data:: SECURITY_EMAIL_CHANGE_SALT
+
+    Specifies the salt value when generating change email confirmation links/tokens.
+
+    Default: ``"change-email-salt"``.
 
 .. py:data:: SECURITY_EMAIL_PLAINTEXT
 
@@ -822,6 +892,13 @@ Registerable
     a username field added. This requires that your user model contain the
     field ``username``. It MUST be set as 'unique' and if you don't want
     to require a username, it should be set as 'nullable'.
+    The form validators will call :meth:`.UsernameUtil.validate`.
+
+    In addition, :data:`SECURITY_USER_IDENTITY_ATTRIBUTES` will be updated to include::
+
+        {"username": {"mapper": uia_username_mapper}, "case_insensitive": True}
+
+    See :meth:`flask_security.uia_username_mapper` for details.
 
     If you already have added a username field to your forms, don't set this
     option - the system will throw an exception at init_app time.
@@ -918,8 +995,8 @@ Confirmable
 .. py:data:: SECURITY_AUTO_LOGIN_AFTER_CONFIRM
 
     If ``True``, then the user corresponding to the confirmation token will be automatically signed in.
-    If ``False`` (the default) then the user will be requires to authenticate using the usual mechanism(s).
-    Note that the confirmation token is not valid after being used once. This is not recommended by OWASP
+    If ``False`` (the default) then the user will be required to authenticate using the usual mechanism(s).
+    Note that the confirmation token is single-use. This is not recommended by OWASP
     however an application that is by invite only (no self-registration) might find this useful.
 
     Default: ``False``.
@@ -1132,11 +1209,6 @@ Change-Email
     only endpoint (accessed via a link in an email).
 
     Default: ``"/change-email-confirm"``.
-.. py:data:: SECURITY_EMAIL_CHANGE_SALT
-
-    Specifies the salt value when generating change email confirmation links/tokens.
-
-    Default: ``"change-email-salt"``.
 
 Additional relevant configuration variables:
 
@@ -1199,6 +1271,14 @@ Configuration related to the two-factor authentication feature.
     Specifies the number of seconds access token is valid.
 
     Default: ``120``.
+.. py:data:: SECURITY_TWO_FACTOR_SETUP_WITHIN
+
+    Specifies the amount of time a user has before their two factor setup
+    token expires. Always pluralize the time unit for this value.
+
+    Default: ``"30 minutes"``
+
+    .. versionadded:: 5.5.0
 .. py:data:: SECURITY_TWO_FACTOR_RESCUE_MAIL
 
     Specifies the email address users send mail to when they can't complete the
@@ -1408,14 +1488,14 @@ Unified Signin
     Removing it from here won't stop users from using the :data:`SECURITY_LOGIN_URL` endpoint
     (unless you replace the login endpoint using :py:data:`SECURITY_US_SIGNIN_REPLACES_LOGIN`).
 
-    This config variable defines which methods can be used to provide authentication data.
-    :py:data:`SECURITY_USER_IDENTITY_ATTRIBUTES` controls what sorts of identities can be used.
+    This config variable defines which methods can be used to provide ``passcode`` data.
+    :py:data:`SECURITY_USER_IDENTITY_ATTRIBUTES` defines which user model fields can be used as ``identity``.
 
     Default: ``["password", "email", "authenticator", "sms"]`` - which are the only supported options.
 
 .. py:data:: SECURITY_US_MFA_REQUIRED
 
-    A list of ``US_ENABLED_METHODS`` that will require two-factor
+    A list of :data:`SECURITY_US_ENABLED_METHODS` that will require two-factor
     authentication. This is of course dependent on the settings of :py:data:`SECURITY_TWO_FACTOR`
     and :py:data:`SECURITY_TWO_FACTOR_REQUIRED`. Note that even with REQUIRED, only
     methods listed here will trigger a two-factor cycle.
@@ -1464,6 +1544,35 @@ Additional relevant configuration variables:
       :py:data:`SECURITY_REDIRECT_BEHAVIOR` equals ``"spa"``.
     * :py:data:`SECURITY_FRESHNESS` - Used to protect /us-setup.
     * :py:data:`SECURITY_FRESHNESS_GRACE_PERIOD` - Used to protect /us-setup.
+
+Username-Recovery
+-----------------
+
+    .. versionadded:: 5.6.0
+
+.. py:data:: SECURITY_USERNAME_RECOVERY
+
+   Specifies whether username recovery is enabled.
+
+   Default: ``False``.
+
+.. py:data:: SECURITY_USERNAME_RECOVERY_URL
+
+    Specifies the username recovery URL.
+
+    Default: ``"/recover-username"``.
+
+.. py:data:: SECURITY_EMAIL_SUBJECT_USERNAME_RECOVERY
+
+   Sets subject for the username recovery email.
+
+   Default: ``_("Your requested username")``.
+
+.. py:data:: SECURITY_USERNAME_RECOVERY_TEMPLATE
+
+   Specifies the path to the template for the username recovery page.
+
+   Default: ``"security/recover_username.html"``.
 
 Passwordless
 -------------
@@ -1654,15 +1763,15 @@ WebAuthn
         - ``"secondary"`` - just keys registered as "secondary" are allowed
 
     If list is empty or ``None`` WebAuthn keys aren't allowed. This also means that the
-            :py:data:`SECURITY_WAN_VERIFY_URL` endpoint won't be registered.
+    :py:data:`SECURITY_WAN_VERIFY_URL` endpoint won't be registered.
 
     Default: ``["first", "secondary"]``
 
 
 Additional relevant configuration variables:
 
-    * :py:data:`SECURITY_FRESHNESS` - Used to protect /us-setup.
-    * :py:data:`SECURITY_FRESHNESS_GRACE_PERIOD` - Used to protect /us-setup.
+    * :py:data:`SECURITY_FRESHNESS` - Used to protect /wan-register and /wan-delete.
+    * :py:data:`SECURITY_FRESHNESS_GRACE_PERIOD` - Used to protect /wan-register and /wan-delete.
 
 Recovery Codes
 --------------
@@ -1785,6 +1894,7 @@ All feature flags. By default all are 'False'/not enabled.
 * :py:data:`SECURITY_CHANGEABLE`
 * :py:data:`SECURITY_TWO_FACTOR`
 * :py:data:`SECURITY_UNIFIED_SIGNIN`
+* :py:data:`SECURITY_USERNAME_RECOVERY`
 * :py:data:`SECURITY_WEBAUTHN`
 * :py:data:`SECURITY_MULTI_FACTOR_RECOVERY_CODES`
 * :py:data:`SECURITY_OAUTH_ENABLE`
@@ -1824,6 +1934,7 @@ A list of all URLs and Views:
 * :py:data:`SECURITY_RESET_VIEW`
 * :py:data:`SECURITY_RESET_ERROR_VIEW`
 * :py:data:`SECURITY_LOGIN_ERROR_VIEW`
+* :py:data:`SECURITY_USERNAME_RECOVERY_URL`
 * :py:data:`SECURITY_US_SIGNIN_URL`
 * :py:data:`SECURITY_US_SETUP_URL`
 * :py:data:`SECURITY_US_SIGNIN_SEND_CODE_URL`
@@ -1855,6 +1966,7 @@ A list of all templates:
 * :py:data:`SECURITY_TWO_FACTOR_VERIFY_CODE_TEMPLATE`
 * :py:data:`SECURITY_TWO_FACTOR_SELECT_TEMPLATE`
 * :py:data:`SECURITY_TWO_FACTOR_SETUP_TEMPLATE`
+* :py:data:`SECURITY_USERNAME_RECOVERY_TEMPLATE`
 * :py:data:`SECURITY_US_SIGNIN_TEMPLATE`
 * :py:data:`SECURITY_US_SETUP_TEMPLATE`
 * :py:data:`SECURITY_US_VERIFY_TEMPLATE`
@@ -1930,6 +2042,7 @@ The default messages and error levels can be found in ``core.py``.
 * ``SECURITY_MSG_TWO_FACTOR_CHANGE_METHOD_SUCCESSFUL``
 * ``SECURITY_MSG_TWO_FACTOR_PERMISSION_DENIED``
 * ``SECURITY_MSG_TWO_FACTOR_METHOD_NOT_AVAILABLE``
+* ``SECURITY_MSG_TWO_FACTOR_SETUP_EXPIRED``
 * ``SECURITY_MSG_TWO_FACTOR_DISABLED``
 * ``SECURITY_MSG_UNAUTHORIZED``
 * ``SECURITY_MSG_UNAUTHENTICATED``
@@ -1944,6 +2057,7 @@ The default messages and error levels can be found in ``core.py``.
 * ``SECURITY_MSG_USERNAME_DISALLOWED_CHARACTERS``
 * ``SECURITY_MSG_USERNAME_NOT_PROVIDED``
 * ``SECURITY_MSG_USERNAME_ALREADY_ASSOCIATED``
+* ``SECURITY_MSG_USERNAME_RECOVERY_REQUEST``
 * ``SECURITY_MSG_WEBAUTHN_EXPIRED``
 * ``SECURITY_MSG_WEBAUTHN_NAME_REQUIRED``
 * ``SECURITY_MSG_WEBAUTHN_NAME_INUSE``
@@ -1956,3 +2070,5 @@ The default messages and error levels can be found in ``core.py``.
 * ``SECURITY_MSG_WEBAUTHN_NO_VERIFY``
 * ``SECURITY_MSG_WEBAUTHN_CREDENTIAL_WRONG_USAGE``
 * ``SECURITY_MSG_WEBAUTHN_MISMATCH_USER_HANDLE``
+
+.. _passlib's CryptoContext: https://passlib.readthedocs.io/en/stable/lib/passlib.context.html

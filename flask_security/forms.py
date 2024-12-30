@@ -56,39 +56,40 @@ from .utils import (
 )
 
 if t.TYPE_CHECKING:  # pragma: no cover
-    from .datastore import User
+    from flask_security import UserMixin
 
 _default_field_labels = {
-    "email": _("Email Address"),
-    "password": _("Password"),
-    "remember_me": _("Remember Me"),
-    "login": _("Login"),
-    "signin": _("Sign In"),
-    "register": _("Register"),
-    "send_confirmation": _("Resend Confirmation Instructions"),
-    "recover_password": _("Recover Password"),
-    "reset_password": _("Reset Password"),
-    "retype_password": _("Retype Password"),
-    "new_password": _("New Password"),
-    "change_password": _("Change Password"),
-    "send_login_link": _("Send Login Link"),
-    "verify_password": _("Verify Password"),
-    "change_method": _("Change Method"),
-    "phone": _("Phone Number"),
-    "code": _("Authentication Code"),
-    "submit": _("Submit"),
-    "submitcode": _("Submit Code"),
-    "error": _("Error(s)"),
-    "identity": _("Identity"),
-    "sendcode": _("Send Code"),
-    "passcode": _("Passcode"),
-    "username": _("Username"),
-    "delete": _("Delete"),
-    "email_method": _("Set up using email"),
     "authapp_method": _(
         "Set up using an authenticator app (e.g. google, lastpass, authy)"
     ),
+    "change_method": _("Change Method"),
+    "change_password": _("Change Password"),
+    "code": _("Authentication Code"),
+    "delete": _("Delete"),
+    "email": _("Email Address"),
+    "email_method": _("Set up using email"),
+    "error": _("Error(s)"),
+    "identity": _("Identity"),
+    "login": _("Login"),
+    "new_password": _("New Password"),
+    "passcode": _("Passcode"),
+    "password": _("Password"),
+    "phone": _("Phone Number"),
+    "recover_password": _("Recover Password"),
+    "recover_username": _("Recover Username"),
+    "register": _("Register"),
+    "remember_me": _("Remember Me"),
+    "reset_password": _("Reset Password"),
+    "retype_password": _("Retype Password"),
+    "send_confirmation": _("Resend Confirmation Instructions"),
+    "send_login_link": _("Send Login Link"),
+    "sendcode": _("Send Code"),
+    "signin": _("Sign In"),
     "sms_method": _("Set up using SMS"),
+    "submit": _("Submit"),
+    "submitcode": _("Submit Code"),
+    "username": _("Username"),
+    "verify_password": _("Verify Password"),
 }
 
 # translated methods for two-factor and us-signin. keyed by form 'choices'
@@ -436,7 +437,7 @@ class SendConfirmationForm(Form, UserEmailFormMixin):
 
     def __init__(self, *args: t.Any, **kwargs: t.Any):
         super().__init__(*args, **kwargs)
-        self.user: User | None = None  # set by valid_user_email
+        self.user: UserMixin | None = None  # set by valid_user_email
         if request and request.method == "GET":
             self.email.data = request.args.get("email", None)
 
@@ -458,7 +459,7 @@ class ForgotPasswordForm(Form, UserEmailFormMixin):
     def __init__(self, *args: t.Any, **kwargs: t.Any):
         super().__init__(*args, **kwargs)
         self.requires_confirmation: bool = False
-        self.user: User | None = None  # set by valid_user_email
+        self.user: UserMixin | None = None  # set by valid_user_email
 
     def validate(self, **kwargs: t.Any) -> bool:
         if not super().validate(**kwargs):
@@ -487,7 +488,7 @@ class PasswordlessLoginForm(Form):
 
     def __init__(self, *args: t.Any, **kwargs: t.Any):
         super().__init__(*args, **kwargs)
-        self.user: User | None = None  # set by valid_user_email
+        self.user: UserMixin | None = None  # set by valid_user_email
 
     def validate(self, **kwargs: t.Any) -> bool:
         if not super().validate(**kwargs):
@@ -527,7 +528,7 @@ class LoginForm(Form, PasswordFormMixin, NextFormMixin):
             )
             self.password.description = html
         self.requires_confirmation: bool = False
-        self.user: User | None = None
+        self.user: UserMixin | None = None
         # ifield can be set by subclasses to skip identity checks.
         self.ifield: Field | None = None
         # If True then user has authenticated so we can show detailed errors
@@ -602,9 +603,9 @@ class VerifyForm(Form, PasswordFormMixin):
 
     submit = SubmitField(get_form_field_label("verify_password"))
 
-    def __init__(self, *args: t.Any, user: User, **kwargs: t.Any):
+    def __init__(self, *args: t.Any, user: UserMixin, **kwargs: t.Any):
         super().__init__(*args, **kwargs)
-        self.user: User = user
+        self.user: UserMixin = user
 
     def validate(self, **kwargs: t.Any) -> bool:
         if not super().validate(**kwargs):  # pragma: no cover
@@ -705,7 +706,7 @@ class ResetPasswordForm(Form, NewPasswordFormMixin, PasswordConfirmFormMixin):
     """The default reset password form"""
 
     # filled in by caller
-    user: User
+    user: UserMixin
 
     submit = SubmitField(get_form_field_label("reset_password"))
 
@@ -827,7 +828,7 @@ class TwoFactorVerifyCodeForm(Form, CodeFormMixin):
         self.window: int = 0
         self.primary_method: str = ""
         self.tf_totp_secret: str = ""
-        self.user: User | None = None  # set by view
+        self.user: UserMixin | None = None  # set by view
 
     def validate(self, **kwargs: t.Any) -> bool:
         if not super().validate(**kwargs):  # pragma: no cover
@@ -871,12 +872,18 @@ class TwoFactorRescueForm(Form):
     submit = SubmitField(get_form_field_label("submit"))
 
 
+class UsernameRecoveryForm(Form, UserEmailFormMixin):
+    """The username recovery form"""
+
+    submit = SubmitField(get_form_field_label("recover_username"))
+
+
 class DummyForm(Form):
     """A dummy form for json responses"""
 
     def __init__(self, *args: t.Any, **kwargs: t.Any):
         super().__init__(*args, **kwargs)
-        self.user: User | None = kwargs.get("user", None)
+        self.user: UserMixin | None = kwargs.get("user", None)
 
 
 def build_form_from_request(form_name: str, **kwargs: dict[str, t.Any]) -> Form:

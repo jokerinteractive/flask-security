@@ -1,5 +1,5 @@
 [project]
-name = "Flask-Security"
+name = "Flask-Security-Too"
 description = "Quickly add security features to your Flask application."
 readme.content-type = "text/x-rst"
 readme.file = "README.rst"
@@ -72,7 +72,7 @@ low = [
     "jinja2==3.1.2",
     "itsdangerous==2.1.2",
     "markupsafe==2.1.2",
-    "mongoengine==0.29.1",
+    "mongoengine==0.27.0",
     "mongomock==4.1.2",
     "pony==0.7.16;python_version<'3.11'",
     "phonenumberslite==8.13.11",

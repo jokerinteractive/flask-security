@@ -4,7 +4,7 @@
 
     Changeable tests
 
-    :copyright: (c) 2019-2023 by J. Christopher Wagner (jwag).
+    :copyright: (c) 2019-2024 by J. Christopher Wagner (jwag).
     :license: MIT, see LICENSE for more details.
 """
 
@@ -14,10 +14,8 @@ import pytest
 from flask import Flask
 import markupsafe
 
-from flask_security.core import UserMixin
+from flask_security import PasswordUtil, UserMixin, password_changed, user_authenticated
 from flask_security.forms import _default_field_labels
-from flask_security.password_util import PasswordUtil
-from flask_security.signals import password_changed, user_authenticated
 from flask_security.utils import localize_callback
 from tests.test_utils import (
     authenticate,
@@ -34,7 +32,8 @@ from tests.test_utils import (
 pytestmark = pytest.mark.changeable()
 
 
-def test_changeable_flag(app, client, get_message):
+def test_changeable_flag(app, clients, get_message):
+    client = clients
     recorded = []
 
     @password_changed.connect_via(app)
@@ -259,6 +258,8 @@ def test_change_invalidates_auth_token(app, client):
 
 
 def test_auth_uniquifier(app):
+    pytest.importorskip("sqlalchemy")
+    pytest.importorskip("flask_sqlalchemy")
     # If add fs_token_uniquifier to user model - change password shouldn't invalidate
     # auth tokens.
     from sqlalchemy import Column, String
@@ -290,31 +291,34 @@ def test_auth_uniquifier(app):
         )
         ds.commit()
 
-        client = app.test_client()
+    client = app.test_client()
 
-        # standard login with auth token
-        response = json_authenticate(client)
-        token = response.json["response"]["user"]["authentication_token"]
-        headers = {"Authentication-Token": token}
-        # make sure can access restricted page
-        response = client.get("/token", headers=headers)
-        assert b"Token Authentication" in response.data
+    # standard login with auth token
+    response = json_authenticate(client)
+    token = response.json["response"]["user"]["authentication_token"]
+    headers = {"Authentication-Token": token}
+    # make sure can access restricted page
+    response = client.get("/token", headers=headers)
+    assert b"Token Authentication" in response.data
 
-        # change password
-        response = client.post(
-            "/change",
-            data={
-                "password": "password",
-                "new_password": "new strong password",
-                "new_password_confirm": "new strong password",
-            },
-            follow_redirects=True,
-        )
-        assert response.status_code == 200
+    # change password
+    response = client.post(
+        "/change",
+        data={
+            "password": "password",
+            "new_password": "new strong password",
+            "new_password_confirm": "new strong password",
+        },
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
 
-        # authtoken should still be valid
-        response = client.get("/token", headers=headers)
-        assert response.status_code == 200
+    # authtoken should still be valid
+    response = client.get("/token", headers=headers)
+    assert response.status_code == 200
+
+    with app.app_context():
+        db.engine.dispose()
 
 
 @pytest.mark.app_settings(babel_default_locale="fr_FR")

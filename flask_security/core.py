@@ -16,10 +16,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 import importlib
+import time
 import typing as t
 import warnings
 
-from flask import current_app, g
+from flask import current_app, g, session
 from flask_login import AnonymousUserMixin, LoginManager
 from flask_login import UserMixin as BaseUserMixin
 from flask_login import current_user
@@ -50,6 +51,7 @@ from .forms import (
     TwoFactorVerifyCodeForm,
     TwoFactorSetupForm,
     TwoFactorRescueForm,
+    UsernameRecoveryForm,
     VerifyForm,
     get_register_username_field,
     login_username_field,
@@ -113,7 +115,7 @@ if t.TYPE_CHECKING:  # pragma: no cover
     from flask.typing import ResponseValue
     import flask_login.mixins
     from authlib.integrations.flask_client import OAuth
-    from .datastore import Role, User, UserDatastore
+    from .datastore import UserDatastore
 
 
 # List of authentication mechanisms supported.
@@ -135,7 +137,7 @@ _default_config: dict[str, t.Any] = {
     "I18N_DOMAIN": "flask_security",
     "I18N_DIRNAME": "builtin",
     "EMAIL_VALIDATOR_ARGS": None,
-    "PASSWORD_HASH": "bcrypt",
+    "PASSWORD_HASH": "argon2",
     "PASSWORD_SALT": None,
     "PASSWORD_SINGLE_HASH": {
         "django_argon2",
@@ -159,17 +161,18 @@ _default_config: dict[str, t.Any] = {
         # And always last one...
         "plaintext",
     ],
+    "DEPRECATED_PASSWORD_SCHEMES": ["auto"],
     "PASSWORD_HASH_OPTIONS": {},  # Deprecated at passlib 1.7
-    "PASSWORD_HASH_PASSLIB_OPTIONS": {
-        "argon2__rounds": 10  # 1.7.1 default is 2.
-    },  # >= 1.7.1 method to pass options.
+    "PASSWORD_HASH_PASSLIB_OPTIONS": {},  # passlib >= 1.7.1 method to pass options
+    # (as part of CryptoContext.using)
     "PASSWORD_LENGTH_MIN": 8,
     "PASSWORD_COMPLEXITY_CHECKER": None,
     "PASSWORD_CHECK_BREACHED": False,
     "PASSWORD_BREACHED_COUNT": 1,
     "PASSWORD_NORMALIZE_FORM": "NFKD",
     "PASSWORD_REQUIRED": True,
-    "DEPRECATED_PASSWORD_SCHEMES": ["auto"],
+    "HASHING_SCHEMES": ["sha256_crypt", "hex_md5"],
+    "DEPRECATED_HASHING_SCHEMES": ["auto"],
     "LOGIN_URL": "/login",
     "LOGOUT_URL": "/logout",
     "REGISTER_URL": "/register",
@@ -201,6 +204,8 @@ _default_config: dict[str, t.Any] = {
     "REDIRECT_HOST": None,
     "REDIRECT_BEHAVIOR": None,
     "REDIRECT_ALLOW_SUBDOMAINS": False,
+    "REDIRECT_BASE_DOMAIN": None,
+    "REDIRECT_ALLOWED_SUBDOMAINS": [],
     "FORGOT_PASSWORD_TEMPLATE": "security/forgot_password.html",
     "LOGIN_USER_TEMPLATE": "security/login_user.html",
     "REGISTER_USER_TEMPLATE": "security/register_user.html",
@@ -229,8 +234,8 @@ _default_config: dict[str, t.Any] = {
     "CHANGE_EMAIL_WITHIN": "2 hours",
     "CHANGE_EMAIL_URL": "/change-email",
     "CHANGE_EMAIL_CONFIRM_URL": "/change-email-confirm",
-    "CHANGE_EMAIL_ERROR_VIEW": None,
-    "POST_CHANGE_EMAIL_VIEW": None,
+    "CHANGE_EMAIL_ERROR_VIEW": None,  # spa
+    "POST_CHANGE_EMAIL_VIEW": None,  # spa
     "CHANGE_EMAIL_SALT": "change-email-salt",
     "CHANGE_EMAIL_SUBJECT": _("Confirm your new email address"),
     "TWO_FACTOR_AUTHENTICATOR_VALIDITY": 120,
@@ -244,6 +249,8 @@ _default_config: dict[str, t.Any] = {
         "secure": False,
         "samesite": "Strict",
     },
+    "TWO_FACTOR_SETUP_SALT": "tf-setup-salt",
+    "TWO_FACTOR_SETUP_WITHIN": "30 minutes",
     "TWO_FACTOR_RESCUE_EMAIL": True,
     "MULTI_FACTOR_RECOVERY_CODES": False,
     "MULTI_FACTOR_RECOVERY_CODES_N": 5,
@@ -283,6 +290,7 @@ _default_config: dict[str, t.Any] = {
     "EMAIL_SUBJECT_PASSWORD_NOTICE": _("Your password has been reset"),
     "EMAIL_SUBJECT_PASSWORD_CHANGE_NOTICE": _("Your password has been changed"),
     "EMAIL_SUBJECT_PASSWORD_RESET": _("Password reset instructions"),
+    "EMAIL_SUBJECT_USERNAME_RECOVERY": _("Your requested username"),
     "EMAIL_PLAINTEXT": True,
     "EMAIL_HTML": True,
     "EMAIL_SUBJECT_TWO_FACTOR": _("Two-factor Login"),
@@ -293,9 +301,8 @@ _default_config: dict[str, t.Any] = {
     "PHONE_REGION_DEFAULT": "US",
     "FRESHNESS": timedelta(hours=24),
     "FRESHNESS_GRACE_PERIOD": timedelta(hours=1),
+    "FRESHNESS_ALLOW_AUTH_TOKEN": True,
     "API_ENABLED_METHODS": ["session", "token"],
-    "HASHING_SCHEMES": ["sha256_crypt", "hex_md5"],
-    "DEPRECATED_HASHING_SCHEMES": ["hex_md5"],
     "DATETIME_FACTORY": naive_utcnow,
     "TOTP_SECRETS": None,
     "TOTP_ISSUER": None,
@@ -320,6 +327,9 @@ _default_config: dict[str, t.Any] = {
         "webauthn": "flask_security.webauthn.WebAuthnTfPlugin",
     },
     "UNIFIED_SIGNIN": False,
+    "USERNAME_RECOVERY": False,
+    "USERNAME_RECOVERY_TEMPLATE": "security/recover_username.html",
+    "USERNAME_RECOVERY_URL": "/recover-username",
     "US_SETUP_SALT": "us-setup-salt",
     "US_SIGNIN_URL": "/us-signin",
     "US_SIGNIN_SEND_CODE_URL": "/us-signin/send-code",
@@ -538,6 +548,10 @@ _default_messages = {
         _("You successfully disabled two factor authorization."),
         "success",
     ),
+    "TWO_FACTOR_SETUP_EXPIRED": (
+        _("Setup must be completed within %(within)s. Please start over."),
+        "error",
+    ),
     "US_CURRENT_METHODS": (
         _("Currently active sign in options: %(method_list)s."),
         "info",
@@ -633,6 +647,10 @@ _default_messages = {
         ),
         "success",
     ),
+    "USERNAME_RECOVERY_REQUEST": (
+        _("If registered, your username will be sent to your email."),
+        "info",
+    ),
 }
 
 
@@ -675,6 +693,7 @@ def _user_loader(user_id):
     user = _security.datastore.find_user(fs_uniquifier=str(user_id))
     if user and user.active:
         set_request_attr("fs_authn_via", "session")
+        set_request_attr("fs_paa", session.get("fs_paa", 0))
         return user
     return None
 
@@ -708,6 +727,8 @@ def _request_loader(request):
 
     if user and user.active and user.verify_auth_token(tdata):
         set_request_attr("fs_authn_via", "token")
+        if cv("FRESHNESS_ALLOW_AUTH_TOKEN"):
+            set_request_attr("fs_paa", tdata.get("fs_paa", 0))
         return user
 
     return None
@@ -789,8 +810,13 @@ def _get_hashing_context(app: flask.Flask) -> CryptContext:
 
 def _get_serializer(app, name):
     secret_key = app.config.get("SECRET_KEY")
+    derived_keys = app.config.get("SECRET_KEY_FALLBACKS")
+
+    secret_keys = [secret_key] + (
+        derived_keys if isinstance(derived_keys, list) else []
+    )
     salt = cv(f"{name.upper()}_SALT", app=app)
-    return URLSafeTimedSerializer(secret_key=secret_key, salt=salt)
+    return URLSafeTimedSerializer(secret_keys, salt=salt)
 
 
 def _context_processor():
@@ -805,9 +831,13 @@ class RoleMixin:
     """Mixin for `Role` model definitions"""
 
     if t.TYPE_CHECKING:  # pragma: no cover
+        id: int
+        name: str
+        description: str | None
+        permissions: list[str] | None
+        update_datetime: datetime
 
-        def __init__(self) -> None:
-            self.permissions: list[str] | None
+        def __init__(self, **kwargs): ...
 
     def __eq__(self, other):
         return self.name == other or self.name == getattr(other, "name", None)
@@ -832,6 +862,35 @@ class RoleMixin:
 class UserMixin(BaseUserMixin):
     """Mixin for `User` model definitions"""
 
+    if t.TYPE_CHECKING:  # pragma: no cover
+        # These are defined in the applications Model files.
+        id: int
+        email: str
+        username: str | None
+        password: str | None
+        active: bool
+        fs_uniquifier: str
+        fs_token_uniquifier: str
+        fs_webauthn_user_handle: str
+        confirmed_at: datetime | None
+        last_login_at: datetime
+        current_login_at: datetime
+        last_login_ip: str | None
+        current_login_ip: str | None
+        login_count: int
+        tf_primary_method: str | None
+        tf_totp_secret: str | None
+        tf_phone_number: str | None
+        mf_recovery_codes: list[str] | None
+        us_phone_number: str | None
+        us_totp_secrets: str | bytes | None
+        create_datetime: datetime
+        update_datetime: datetime
+        roles: list[RoleMixin]
+        webauthn: list[WebAuthnMixin]
+
+        def __init__(self, **kwargs): ...
+
     def get_id(self) -> str:
         """Returns the user identification attribute. 'Alternative-token' for
         Flask-Login. This is always ``fs_uniquifier``.
@@ -850,8 +909,12 @@ class UserMixin(BaseUserMixin):
 
         :raises ValueError: If ``fs_token_uniquifier`` is part of model but not set.
 
-        Optionally use a separate uniquifier so that changing password doesn't
-        invalidate auth tokens.
+        Uses ``fs_uniquifier`` or ``fs_token_uniquifier`` (if in the UserModel)
+        to identify this user. If ``fs_token_uniquifier`` is used then
+        changing password doesn't invalidate auth tokens.
+
+        Calls :meth:`.UserMixin.augment_auth_token` which applications can override
+        to add any additional information.
 
         The returned value is securely signed using the ``remember_token_serializer``
 
@@ -861,6 +924,9 @@ class UserMixin(BaseUserMixin):
         .. versionchanged:: 5.4.0
             New format - a dict with a version string. Add a token-based expiry
             option as well as a session id.
+        .. versionchanged:: 5.5.0
+            Remove session id (never set or used); added fs_paa (last authentication
+            timestamp)
         """
 
         tdata: dict[str, t.Any] = dict(ver=str(5))
@@ -870,7 +936,9 @@ class UserMixin(BaseUserMixin):
             tdata["uid"] = str(self.fs_token_uniquifier)
         else:
             tdata["uid"] = str(self.fs_uniquifier)
-        tdata["sid"] = 0  # session id
+        # Set the primary authenticated at variable. This is equivalent to
+        # what we set in the session.
+        tdata["fs_paa"] = time.time()  # equivalent of session["fs_paa"]
         tdata["exp"] = int(cv("TOKEN_EXPIRE_TIMESTAMP")(self))  # if >0 then shorter of
         # :data:SECURITY_MAX_AGE and this.
 
@@ -882,7 +950,8 @@ class UserMixin(BaseUserMixin):
 
     def augment_auth_token(self, tdata: dict[str, t.Any]) -> None:
         """Override this to add/modify parts of the auth token.
-        Additions to the dict can be made and verified in verify_auth_token()
+        Additions to the dict can be made here and verified in
+        :meth:`.UserMixin.verify_auth_token`
 
         .. versionadded:: 5.4.0
         """
@@ -904,7 +973,7 @@ class UserMixin(BaseUserMixin):
         """
         return True
 
-    def has_role(self, role: str | Role) -> bool:
+    def has_role(self, role: str | RoleMixin) -> bool:
         """Returns `True` if the user identifies with the specified role.
 
         :param role: A role name or `Role` instance"""
@@ -1029,11 +1098,27 @@ class UserMixin(BaseUserMixin):
 
 
 class WebAuthnMixin:
+    if t.TYPE_CHECKING:  # pragma: no cover
+        # These are defined in the applications Model files.
+        id: int
+        name: str
+        credential_id: bytes
+        public_key: bytes
+        sign_count: int
+        transports: list[str] | None
+        backup_state: bool
+        device_type: str
+        extensions: str | None
+        lastuse_datetime: datetime
+        usage: str
+
+        def __init__(self, **kwargs): ...
+
     def get_user_mapping(self) -> dict[str, t.Any]:
         """
         Return the filter needed by find_user() to get the user
         associated with this webauthn credential.
-        Note that this probably has to be overridden using mongoengine.
+        Note that this probably has to be overridden when using mongoengine.
 
         .. versionadded:: 5.0.0
         """
@@ -1075,6 +1160,7 @@ class Security:
     :param two_factor_select_form: set form for selecting between active 2FA methods
     :param mf_recovery_codes_form: set form for retrieving and setting recovery codes
     :param mf_recovery_form: set form for multi factor recovery
+    :param username_recovery_form: set form for the username recovery view
     :param us_signin_form: set form for the unified sign in view
     :param us_setup_form: set form for the unified sign in setup view
     :param us_setup_validate_form: set form for the unified sign in setup validate view
@@ -1144,6 +1230,8 @@ class Security:
     .. versionadded:: 5.5.0
         ``change_email_form`` in support of the
          :ref:`Change-Email<configuration:change-email>` feature.
+    .. versionadded:: 5.6.0
+        ``username_recovery_form``
 
     .. deprecated:: 4.0.0
         ``send_mail`` and ``send_mail_task``. Replaced with ``mail_util_cls``.
@@ -1202,6 +1290,7 @@ class Security:
         phone_util_cls: t.Type[PhoneUtil] = PhoneUtil,
         render_template: t.Callable[..., str] = default_render_template,
         totp_cls: t.Type[Totp] = Totp,
+        username_recovery_form: t.Type[UsernameRecoveryForm] = UsernameRecoveryForm,
         username_util_cls: t.Type[UsernameUtil] = UsernameUtil,
         webauthn_util_cls: t.Type[WebauthnUtil] = WebauthnUtil,
         mf_recovery_codes_util_cls: t.Type[MfRecoveryCodesUtil] = MfRecoveryCodesUtil,
@@ -1249,6 +1338,7 @@ class Security:
             "two_factor_select_form": FormInfo(cls=two_factor_select_form),
             "mf_recovery_codes_form": FormInfo(cls=mf_recovery_codes_form),
             "mf_recovery_form": FormInfo(cls=mf_recovery_form),
+            "username_recovery_form": FormInfo(cls=username_recovery_form),
             "us_signin_form": FormInfo(cls=us_signin_form),
             "us_setup_form": FormInfo(cls=us_setup_form),
             "us_setup_validate_form": FormInfo(cls=us_setup_validate_form),
@@ -1270,7 +1360,7 @@ class Security:
             default_unauthz_handler
         )
         self._render_json: t.Callable[
-            [dict[str, t.Any], int, dict[str, str] | None, User | None],
+            [dict[str, t.Any], int, dict[str, str] | None, UserMixin | None],
             ResponseValue,
         ] = default_render_json
         self._want_json: t.Callable[[Request], bool] = default_want_json
@@ -1282,6 +1372,7 @@ class Security:
         self.change_email_serializer: URLSafeTimedSerializer
         self.confirm_serializer: URLSafeTimedSerializer
         self.us_setup_serializer: URLSafeTimedSerializer
+        self.tf_setup_serializer: URLSafeTimedSerializer
         self.tf_validity_serializer: URLSafeTimedSerializer
         self.wan_serializer: URLSafeTimedSerializer
         self.principal: Principal
@@ -1303,6 +1394,7 @@ class Security:
         self._password_util: PasswordUtil
         self._totp_factory: Totp
         self._username_util: UsernameUtil
+        self._webauthn_util: WebauthnUtil
         self._mf_recovery_codes_util: MfRecoveryCodesUtil
 
         # Add necessary attributes here to keep mypy happy
@@ -1388,6 +1480,7 @@ class Security:
             "two_factor_select_form",
             "mf_recovery_form",
             "mf_recovery_codes_form",
+            "username_recovery_form",
             "us_signin_form",
             "us_setup_form",
             "us_setup_validate_form",
@@ -1463,6 +1556,7 @@ class Security:
         self.change_email_serializer = _get_serializer(app, "change_email")
         self.confirm_serializer = _get_serializer(app, "confirm")
         self.us_setup_serializer = _get_serializer(app, "us_setup")
+        self.tf_setup_serializer = _get_serializer(app, "two_factor_setup")
         self.tf_validity_serializer = _get_serializer(app, "two_factor_validity")
         self.wan_serializer = _get_serializer(app, "wan")
         self.principal = _get_principal(app)
@@ -1766,7 +1860,7 @@ class Security:
     def render_json(
         self,
         cb: t.Callable[
-            [dict[str, t.Any], int, dict[str, str] | None, User | None],
+            [dict[str, t.Any], int, dict[str, str] | None, UserMixin | None],
             ResponseValue,
         ],
     ) -> None:
@@ -1944,6 +2038,11 @@ class Security:
         self, fn: t.Callable[[], dict[str, t.Any]]
     ) -> None:
         self._add_ctx_processor("change_password", fn)
+
+    def recover_username_context_processor(
+        self, fn: t.Callable[[], dict[str, t.Any]]
+    ) -> None:
+        self._add_ctx_processor("recover_username", fn)
 
     def send_confirmation_context_processor(
         self, fn: t.Callable[[], dict[str, t.Any]]

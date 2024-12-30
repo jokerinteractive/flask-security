@@ -1,4 +1,8 @@
 # Copyright 2019-2022 by J. Christopher Wagner (jwag). All rights reserved.
+# flake8: noqa: F402
+import pytest
+
+pytest.importorskip("flask_sqlalchemy")
 
 from fsqlalchemy1.app import Blog
 
@@ -22,6 +26,8 @@ def test_monitor_404(myapp):
         headers={myapp.config["SECURITY_TOKEN_AUTHENTICATION_HEADER"]: "token"},
     )
     assert resp.status_code == 403
+    with myapp.app_context():
+        ds.db.engine.dispose()
 
 
 def test_blog_write(myapp):
@@ -46,3 +52,6 @@ def test_blog_write(myapp):
     )
     assert resp.status_code == 200
     assert b"Yes, unittest@me.com can update blog" == resp.data
+
+    with myapp.app_context():
+        ds.db.engine.dispose()

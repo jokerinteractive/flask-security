@@ -12,15 +12,15 @@ info:
     if you render the form from your Flask application. If you send JSON, then you must include a request header (configured via __SECURITY_CSRF_HEADER__).
     Please read the online documentation to find out details on how CSRF can be configured.
 
-    You can download the latest spec from: https://github.com/Flask-Middleware/flask-security/blob/master/docs/openapi.yaml
+    You can download the latest spec from: https://github.com/pallets-eco/flask-security/blob/main/docs/openapi.yaml
   version: 2.0.0
   title: "Flask-Security External API"
   contact:
-    name: Flask-Security-Too
-    url: https://github.com/Flask-Middleware/flask-security
+    name: Flask-Security
+    url: https://github.com/pallets-eco/flask-security
   license:
     name: MIT
-    url: https://github.com/Flask-Middleware/flask-security/blob/master/LICENSE
+    url: https://github.com/pallets-eco/flask-security/blob/main/LICENSE
 paths:
   /login:
     get:
@@ -31,8 +31,9 @@ paths:
             Login form or user information. The JSON response will always
             carry the csrf_token information.
             If SECURITY_CSRF_COOKIE_NAME is set then a cookie with the csrf token will be set.
-            If the caller is logged in, then
-            additional information is returned. This can be very useful for single-page applications where during a force refresh, all state is lost.
+            If the caller is already authenticated, then
+            additional information is returned for JSON requests.
+            This can be very useful for single-page applications where during a force refresh, all state is lost.
             By performing this GET, the session cookie will authenticate the user and the response will contain user information.
           content:
             text/html:
@@ -43,7 +44,7 @@ paths:
             application/json:
               schema:
                 allOf:
-                  - $ref: '#/components/schemas/BaseJsonResponse'
+                  - $ref: '#/components/schemas/DefaultJsonResponse'
                   - type: object
                     properties:
                       response:
@@ -102,8 +103,8 @@ paths:
                 example: render_template(SECURITY_LOGIN_USER_TEMPLATE) with error values
         302:
           description: >
-            If the caller already authenticated, the form contents is ignored and a
-            redirect is done: redirect(next) or redirect(SECURITY_POST_LOGIN_VIEW).
+            If the caller is already authenticated, the form contents is ignored and a
+            redirect is done: redirect(SECURITY_POST_LOGIN_VIEW) (note that 'next' is ignored).
 
             If the caller is NOT already authenticated, and the form contents are
             validated the caller will be redirected to:
@@ -645,6 +646,50 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/DefaultJsonErrorResponse"
+  /recover-username:
+    get:
+      summary: GET username recovery form
+      responses:
+        200:
+          description: Username recovery form
+          content:
+            text/html:
+              schema:
+                type: string
+                description: render_template(SECURITY_USERNAME_RECOVERY_TEMPLATE)
+                example: render_template(SECURITY_USERNAME_RECOVERY_TEMPLATE)
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DefaultJsonResponseNoUser"
+    post:
+      summary: Request username recovery
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecoverUsername"
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/RecoverUsername"
+      responses:
+        200:
+          description: Send username recovery email
+          content:
+            text/html:
+              schema:
+                type: string
+                description: render_template(SECURITY_USERNAME_RECOVERY_TEMPLATE)
+                example: render_template(SECURITY_USERNAME_RECOVERY_TEMPLATE)
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DefaultJsonResponseNoUser"
+        400:
+          description: Error when trying to send recovery email (e.g. user doesn't exist)
+          content:
+            application/json:
+              schema:
+                $ref: "#components/schemas/DefaultJsonErrorResponse"
   /confirm:
     get:
       summary: GET send confirmation form
@@ -734,7 +779,13 @@ paths:
       summary: GET Unified Sign In form
       responses:
         200:
-          description: Sign in form
+          description: >
+            Sign in form
+            If SECURITY_CSRF_COOKIE_NAME is set then a cookie with the csrf token will be set.
+            If the caller is already authenticated, then
+            additional information is returned for JSON requests.
+            This can be very useful for single-page applications where during a force refresh, all state is lost.
+            By performing this GET, the session cookie will authenticate the user and the response will contain user information.
           content:
             text/html:
               schema:
@@ -743,17 +794,19 @@ paths:
                 example: render_template(SECURITY_US_SIGNIN_TEMPLATE)
             application/json:
               schema:
-                type: object
-                properties:
-                  available_methods:
-                    type: string
-                    description: Config setting SECURITY_US_ENABLED_METHODS
-                  code_methods:
-                    type: string
-                    description: All SECURITY_US_ENABLED_METHODS that require a code to be generated and sent.
-                  identity_attributes:
-                    type: string
-                    description: Configuration setting SECURITY_USER_IDENTITY_ATTRIBUTES
+                allOf:
+                  - $ref: '#/components/schemas/DefaultJsonResponse'
+                  - type: object
+                    properties:
+                      available_methods:
+                        type: string
+                        description: Config setting SECURITY_US_ENABLED_METHODS
+                      code_methods:
+                        type: string
+                        description: All SECURITY_US_ENABLED_METHODS that require a code to be generated and sent.
+                      identity_attributes:
+                        type: string
+                        description: Configuration setting SECURITY_USER_IDENTITY_ATTRIBUTES
     post:
       summary: Unified Sign In
       parameters:
@@ -786,8 +839,8 @@ paths:
                 example: render_template(SECURITY_US_SIGNIN_TEMPLATE) with error values
         302:
           description: >
-            If the caller already authenticated, the form contents is ignored and a
-            redirect is done: redirect(next) or redirect(SECURITY_POST_LOGIN_VIEW).
+            If the caller already authenticated, the form contents are ignored and a
+            redirect is done: redirect(SECURITY_POST_LOGIN_VIEW) (note that 'next' is ignored).
 
             If the caller is NOT already authenticated, and the form contents are
             validated the caller will be redirected to:
@@ -1040,20 +1093,6 @@ paths:
         required: true
         schema:
           type: string
-    get:
-      summary: Validate unified sign in setup request.
-      description: >
-        This does nothing but redirect back to the setup form.
-      responses:
-        200:
-          description: Get form.
-          content:
-            text/html:
-              schema:
-                type: string
-                description: render_template(SECURITY_US_SETUP_TEMPLATE)
-                example: render_template(SECURITY_US_SETUP_TEMPLATE)
-
     post:
       summary: Validate passcode sent and store setup method.
       requestBody:
@@ -1073,15 +1112,19 @@ paths:
               schema:
                 $ref: "#/components/schemas/UsSetupValidateJsonResponse"
         302:
-          description: Successfully validated and persisted sign in method.
+          description: Redirect based on success or failure.
           headers:
             Location:
               description: |
                 On form-success: SECURITY_US_POST_SETUP_VIEW
+
+                On form-error: .us-setup
+
+                Form errors include bad code, expired token, bad token.
               schema:
                 type: string
         400:
-          description: Validation failed.
+          description: Failed - bad code, expired token, bad token.
           content:
             application/json:
               schema:
@@ -1173,11 +1216,10 @@ paths:
 
         3) An authenticated user wishes to enable or disable 2FA (assuming SECURITY_TWO_FACTOR_REQUIRED is False).
 
-
         Allowed 2FA methods are controlled via the configuration SECURITY_TWO_FACTOR_ENABLED_METHODS.
 
-
-        This endpoint is protected by a 'freshness' check - meaning the caller will be required to have authenticated recently. In addition, to ensure correctness, the newly setup method must be verified by sending and entering a code prior to it being permanently stored.
+        This endpoint is protected by a 'freshness' check - meaning the caller will be required to have authenticated recently.
+        In addition, to ensure correctness, the newly setup method must be verified by sending and entering a code prior to it being permanently stored.
       requestBody:
         required: true
         content:
@@ -1217,6 +1259,49 @@ paths:
                 $ref: "#/components/schemas/DefaultJsonErrorResponse"
         500:
           description: Error when trying to send code.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DefaultJsonErrorResponse"
+  /tf-setup/{token}:
+    parameters:
+      - name: token
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      summary: Validate code sent and store setup method.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TfSetupValidateRequest"
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/TfSetupValidateRequest"
+      responses:
+        200:
+          description: Successfully validated and persisted two factor method.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TfSetupValidateJsonResponse"
+        302:
+          description: Success or Failure.
+          headers:
+            Location:
+              description: |
+                On form-success: SECURITY_TWO_FACTOR_POST_SETUP_VIEW
+
+                On form-error: .tf-setup
+
+                Form errors include bad code, expired token, bad token.
+              schema:
+                type: string
+        400:
+          description: Failed - bad code, expired token, bad token.
           content:
             application/json:
               schema:
@@ -2190,6 +2275,14 @@ components:
           type: string
           description: >
             Email address to send link email to.
+    RecoverUsername:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          description: >
+            Email address associated with the account.
     UsSignin:
       type: object
       required: [identity, passcode]
@@ -2315,7 +2408,14 @@ components:
                   description: >
                     Current state of Two Factor configuration. Not present when disabling 2FA. This will be set to 'validating_profile'
                     indicating the caller needs to call '/tf-validate' with the correct code.
+                    N.B. as of 5.5.0 this is only used for setting up as part of initial login when 2FA is required.
+                    See tf_state_token below for use when an authenticated user wants to change their 2FA method.
                   example: validating_profile
+                tf_state_token:
+                  type: string
+                  description: >
+                    Timed and signed token containing necessary state to complete the setup. To validate the method POST
+                    the code to '/tf-setup/<tf_state_token>'.
                 tf_primary_method:
                   type: string
                   description: Current method being configured (deprecated).
@@ -2373,7 +2473,30 @@ components:
                   tf_signin_url:
                     type: string
                     description: The value of SECURITY_WAN_SIGNIN_URL
-
+    TfSetupValidateRequest:
+      type: object
+      required: [code]
+      properties:
+        code:
+          type: string
+          description: Code as received from method being setup.
+    TfSetupValidateJsonResponse:
+      allOf:
+        - $ref: '#/components/schemas/BaseJsonResponse'
+        - type: object
+          properties:
+            response:
+              type: object
+              properties:
+                tf_method:
+                  type: string
+                  description: The method as passed into API.
+                tf_primary_method:
+                  type: string
+                  description: The method as passed into API.
+                tf_phone:
+                  type: string
+                  description: Phone number if set.
     WanRegister:
       type: object
       required: [ name, usage ]

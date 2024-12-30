@@ -28,6 +28,7 @@
 
 """
 
+from __future__ import annotations
 from functools import partial
 import time
 import typing as t
@@ -35,6 +36,7 @@ import typing as t
 from flask import (
     Blueprint,
     after_this_request,
+    current_app,
     jsonify,
     request,
     session,
@@ -63,10 +65,12 @@ from .forms import (
     TwoFactorVerifyCodeForm,
     TwoFactorSetupForm,
     TwoFactorRescueForm,
+    UsernameRecoveryForm,
 )
 from .passwordless import login_token_status, send_login_instructions
 from .proxies import _security, _datastore
 from .quart_compat import get_quart_status
+from .signals import tf_profile_changed
 from .unified_signin import (
     us_signin,
     us_signin_send_code,
@@ -80,6 +84,7 @@ from .recoverable import (
     reset_password_token_status,
     send_reset_password_instructions,
     update_password,
+    send_username_recovery_email,
 )
 from .registerable import register_user, register_existing
 from .recovery_codes import mf_recovery, mf_recovery_codes
@@ -97,6 +102,7 @@ from .twofactor import (
 from .utils import (
     base_render_json,
     check_and_update_authn_fresh,
+    check_and_get_token_status,
     config_value as cv,
     do_flash,
     get_identity_attributes,
@@ -106,10 +112,11 @@ from .utils import (
     get_post_register_redirect,
     get_post_verify_redirect,
     get_request_attr,
+    get_within_delta,
     get_url,
+    handle_already_auth,
     hash_password,
     is_user_authenticated,
-    json_error_response,
     localize_callback,
     login_user,
     logout_user,
@@ -154,35 +161,14 @@ def _ctx(endpoint):
 
 
 @unauth_csrf()
-def login() -> "ResponseValue":
-    """View function for login view
-
-    Allow already authenticated users. For GET this is useful for
-    single-page-applications on refresh - session still active but need to
-    access user info and csrf-token.
-    For POST - redirects to POST_LOGIN_VIEW (forms) or returns 400 (json).
-    """
+def login() -> ResponseValue:
+    """View function for login view"""
     form = t.cast(LoginForm, build_form_from_request("login_form"))
 
     if is_user_authenticated(current_user):
-        # Just redirect current_user to POST_LOGIN_VIEW.
-        # While its tempting to try to logout the current user and login the
-        # new requested user - that simply doesn't work with CSRF.
-
-        # This does NOT use get_post_login_redirect() so that it doesn't look at
-        # 'next' - which can cause infinite redirect loops
-        # (see test_common::test_authenticated_loop)
-        if _security._want_json(request):
-            if request.method == "POST":
-                payload = json_error_response(
-                    errors=get_message("ANONYMOUS_USER_REQUIRED")[0]
-                )
-                return _security._render_json(payload, 400, None, None)
-            else:
-                form.user = current_user
-                return base_render_json(form)
-        else:
-            return redirect(get_url(cv("POST_LOGIN_VIEW")))
+        return handle_already_auth(
+            form, payload={"identity_attributes": get_identity_attributes()}
+        )
 
     # Clean out any potential old session info - in case of previous
     # aborted 2FA attempt.
@@ -299,7 +285,7 @@ def logout():
 
 @anonymous_user_required
 @unauth_csrf()
-def register() -> "ResponseValue":
+def register() -> ResponseValue:
     """View function which handles a registration request."""
 
     # For some unknown historic reason - if you don't require confirmation
@@ -754,9 +740,9 @@ def two_factor_setup():
     """
     form = t.cast(TwoFactorSetupForm, build_form_from_request("two_factor_setup_form"))
 
-    if not is_user_authenticated(current_user):
+    changing = is_user_authenticated(current_user)
+    if not changing:
         # This is the initial login case
-        # We can also get here from setup if they want to change TODO: how?
         if not all(k in session for k in ["tf_user_id", "tf_state"]) or session[
             "tf_state"
         ] not in ["setup_from_login", "validating_profile"]:
@@ -806,10 +792,20 @@ def two_factor_setup():
         session["tf_totp_secret"] = totp
         session["tf_primary_method"] = pm
         session["tf_state"] = "validating_profile"
+        # currently - state_token only works for changing TFA - not initial login
+        state_token = None
+        if changing:
+            state = {
+                "totp_secret": totp,
+                "method": pm,
+                "phone": phone,
+            }
+            state_token = _security.tf_setup_serializer.dumps(state)
         json_response = {
-            "tf_state": "validating_profile",
+            "tf_state": "validating_profile",  # deprecated in 5.5.0
             "tf_primary_method": pm,  # old
             "tf_method": pm,
+            "tf_state_token": state_token,
         }
         if phone:
             #  TODO dont save here - wait until complete
@@ -860,13 +856,13 @@ def two_factor_setup():
             primary_method=localize_callback(
                 _setup_methods_xlate[getattr(user, "tf_primary_method", None)]
             ),
+            changing=changing,
+            state_token=state_token,
             **qrcode_values,
             **_ctx("tf_setup"),
         )
 
     # We get here on GET and POST with failed validation.
-    # For things like phone number - we've already done one POST
-    # that succeeded and now it failed - so retain the initial info
     choices = cv("TWO_FACTOR_ENABLED_METHODS")
     if (not cv("TWO_FACTOR_REQUIRED")) and user.tf_primary_method is not None:
         choices.insert(0, "disable")
@@ -888,13 +884,88 @@ def two_factor_setup():
         two_factor_setup_form=form,
         two_factor_verify_code_form=code_form,
         choices=choices,
-        chosen_method=form.setup.data,
+        chosen_method=None,
         primary_method=localize_callback(
             _setup_methods_xlate[getattr(user, "tf_primary_method", None)]
         ),
+        changing=changing,
+        state_token=None,
         two_factor_required=cv("TWO_FACTOR_REQUIRED"),
         **_ctx("tf_setup"),
     )
+
+
+@auth_required(lambda: cv("API_ENABLED_METHODS"))
+def two_factor_setup_validate(token: str) -> ResponseValue:
+    """
+    Validate new setup.
+    The token is the state variable which is signed and timed
+    and contains all the state that once confirmed will be stored in the user record.
+    Unlike the code in two_factor_token_validation - this works w/o a session.
+    It also is JUST for setting up/changing two factor for an authenticated user.
+    """
+    form = t.cast(
+        TwoFactorVerifyCodeForm, build_form_from_request("two_factor_verify_code_form")
+    )
+
+    expired, invalid, state = check_and_get_token_status(
+        token, "tf_setup", get_within_delta("TWO_FACTOR_SETUP_WITHIN")
+    )
+    if invalid:
+        m, c = get_message("API_ERROR")
+    if expired:
+        m, c = get_message(
+            "TWO_FACTOR_SETUP_EXPIRED", within=cv("TWO_FACTOR_SETUP_WITHIN")
+        )
+    if invalid or expired:
+        tf_clean_session()  # until we completely remove session based setup/state
+        if _security._want_json(request):
+            form.form_errors.append(m)
+            return base_render_json(form, include_user=False)
+        do_flash(m, c)
+        return redirect(url_for_security("two_factor_setup"))
+
+    totp_secret = state["totp_secret"]
+    method = state["method"]
+    phone = state["phone"]
+    form.tf_totp_secret = totp_secret
+    form.primary_method = method
+    form.user = current_user
+
+    if form.validate_on_submit():
+        tf_clean_session()  # until we completely remove session based setup/state
+        after_this_request(view_commit)
+        _datastore.tf_set(current_user, method, totp_secret, phone)
+        # TODO: should validity cookie be removed? extended? left alone?
+        # Currently - leave it alone - meaning cookie still set.
+
+        tf_profile_changed.send(
+            current_app._get_current_object(),  # type: ignore[attr-defined]
+            _async_wrapper=current_app.ensure_sync,
+            user=current_user,
+            method=method,
+        )
+
+        if _security._want_json(request):
+            return base_render_json(
+                form,
+                include_user=False,
+                additional=dict(
+                    tf_method=method,
+                    tf_primary_method=method,
+                    tf_phone=current_user.tf_phone_number,
+                ),
+            )
+        else:
+            do_flash(*get_message("TWO_FACTOR_CHANGE_METHOD_SUCCESSFUL"))
+            return redirect(get_url(cv("TWO_FACTOR_POST_SETUP_VIEW")))
+
+    # Code not correct/outdated.
+    if _security._want_json(request):
+        return base_render_json(form, include_user=False)
+    m, c = get_message("TWO_FACTOR_INVALID_TOKEN")
+    do_flash(m, c)
+    return redirect(url_for_security("two_factor_setup"))
 
 
 @unauth_csrf()
@@ -1075,6 +1146,41 @@ def two_factor_rescue():
     )
 
 
+@anonymous_user_required
+@unauth_csrf()
+def recover_username():
+    """View function for username recovery"""
+
+    form = t.cast(
+        UsernameRecoveryForm, build_form_from_request("username_recovery_form")
+    )
+
+    if form.validate_on_submit():
+        send_username_recovery_email(form.user)
+
+        if _security._want_json(request):
+            return base_render_json(form, include_user=False)
+
+        do_flash(*get_message("USERNAME_RECOVERY_REQUEST"))
+
+        return redirect(url_for_security("login"))
+    elif request.method == "POST" and cv("RETURN_GENERIC_RESPONSES"):
+        rinfo = dict(email=dict())
+        form_errors_munge(form, rinfo)
+        if not form.errors:
+            if not _security._want_json(request):
+                do_flash(*get_message("USERNAME_RECOVERY_REQUEST"))
+
+    if _security._want_json(request):
+        return base_render_json(form, include_user=False)
+
+    return _security.render_template(
+        cv("USERNAME_RECOVERY_TEMPLATE"),
+        username_recovery_form=form,
+        **_ctx("recover_username"),
+    )
+
+
 def create_blueprint(app, state, import_name):
     """Creates the security extension blueprint"""
 
@@ -1161,6 +1267,11 @@ def create_blueprint(app, state, import_name):
             endpoint="two_factor_setup",
         )(two_factor_setup)
         bp.route(
+            two_factor_setup_url + slash_url_suffix(two_factor_setup_url, "<token>"),
+            methods=["POST"],
+            endpoint="two_factor_setup_validate",
+        )(two_factor_setup_validate)
+        bp.route(
             two_factor_token_validation_url,
             methods=["GET", "POST"],
             endpoint="two_factor_token_validation",
@@ -1178,6 +1289,7 @@ def create_blueprint(app, state, import_name):
 
     if state.recoverable:
         reset_url = cv("RESET_URL", app=app)
+        username_recovery_url = cv("USERNAME_RECOVERY_URL", app=app)
         bp.route(reset_url, methods=["GET", "POST"], endpoint="forgot_password")(
             forgot_password
         )
@@ -1186,6 +1298,12 @@ def create_blueprint(app, state, import_name):
             methods=["GET", "POST"],
             endpoint="reset_password",
         )(reset_password)
+        if cv("USERNAME_RECOVERY", app=app):
+            bp.route(
+                username_recovery_url,
+                methods=["GET", "POST"],
+                endpoint="recover_username",
+            )(recover_username)
 
     if state.changeable:
         bp.route(
